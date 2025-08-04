@@ -18,7 +18,6 @@ COPY requirements.txt .
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY debug_imports.py .
 COPY swing_trader.py .
 
 # Run the trading bot
