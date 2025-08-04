@@ -21,5 +21,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY debug_imports.py .
 COPY swing_trader.py .
 
-# Run debug script first to check imports
-CMD ["python", "debug_imports.py"]
+# Run the trading bot
+CMD ["python", "swing_trader.py"]
