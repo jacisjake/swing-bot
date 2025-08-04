@@ -7,7 +7,7 @@ import pytz
 from datetime import datetime, timedelta
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -142,7 +142,7 @@ def fetch_ltc_data():
         
         request = CryptoBarsRequest(
             symbol_or_symbols=[CRYPTO_SYMBOL], 
-            timeframe=TimeFrame.Minute5,
+            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
             start=start
         )
         bars_response = crypto_data_client.get_crypto_bars(request)
@@ -300,13 +300,13 @@ def run_ltc_scalping():
 # =============================================================================
 
 def fetch_nvda_data():
-    """Fetch daily NVDA data"""
+    """Fetch 5-minute NVDA data"""
     try:
-        start = datetime.now() - timedelta(days=60)
+        start = datetime.now() - timedelta(days=7)
         
         request = StockBarsRequest(
             symbol_or_symbols=[STOCK_SYMBOL], 
-            timeframe=TimeFrame.Day,
+            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
             start=start
         )
         bars_response = stock_data_client.get_stock_bars(request)
@@ -318,10 +318,10 @@ def fetch_nvda_data():
             df = df.xs(STOCK_SYMBOL, level=0) if STOCK_SYMBOL in df.index.get_level_values(0) else df
         
         if len(df) == 0:
-            logger.error(f"No daily data for {STOCK_SYMBOL}")
+            logger.error(f"No 5-minute data for {STOCK_SYMBOL}")
             return None
             
-        logger.info(f"📊 [NVDA] Fetched {len(df)} daily bars")
+        logger.info(f"📊 [NVDA] Fetched {len(df)} 5-minute bars")
         return df
         
     except Exception as e:
@@ -461,7 +461,7 @@ def main():
     
     logger.info("🚀 Starting Dual-Asset Trading Bot")
     logger.info(f"📊 LTC 5-min scalping (24/7): EMA {FAST_EMA}/{SLOW_EMA}, Portfolio limit: {MAX_PORTFOLIO_PERCENT:.0%}")
-    logger.info(f"📈 NVDA daily trading (market hours): EMA {FAST_EMA}/{SLOW_EMA}, 6% TP / 3% SL")
+    logger.info(f"📈 NVDA 5-min trading (market hours): EMA {FAST_EMA}/{SLOW_EMA}, 6% TP / 3% SL")
     logger.info(f"💰 LTC Targets: {TAKE_PROFIT_1:.1%}, {TAKE_PROFIT_2:.1%}, {TAKE_PROFIT_3:.1%} | SL: {STOP_LOSS_PERCENT:.1%}")
     logger.info("⚠️  LIVE TRADING MODE - Real money at risk!")
     
