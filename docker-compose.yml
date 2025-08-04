@@ -11,6 +11,8 @@ services:
       - CRYPTO_SYMBOL=LTC/USD
       - STOCK_QUANTITY=1
       - CRYPTO_QUANTITY=0.1
+      - STOP_LOSS_PERCENT=0.03
+      - TAKE_PROFIT_PERCENT=0.06
     volumes:
       - ./logs:/app/logs
       - /etc/localtime:/etc/localtime:ro

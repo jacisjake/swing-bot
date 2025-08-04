@@ -40,6 +40,8 @@ environment:
   - CRYPTO_SYMBOL=LTC/USD       # Crypto for after hours  
   - STOCK_QUANTITY=1            # Number of stock shares
   - CRYPTO_QUANTITY=0.1         # Amount of crypto to trade
+  - STOP_LOSS_PERCENT=0.03      # 3% stop loss
+  - TAKE_PROFIT_PERCENT=0.06    # 6% take profit
 ```
 
 ### 3. Deploy via Portainer
@@ -57,6 +59,23 @@ environment:
 - **After Hours**: LTC/USD crypto (24/7 when market closed)
 - **Execution**: Runs every 10 minutes
 - **Order Type**: Market orders
+
+## 🛡️ Risk Management
+
+### **Automatic Exit Conditions (Priority Order):**
+1. **🚨 Take Profit**: 6% gain → Force exit
+2. **🚨 Stop Loss**: 3% loss → Force exit  
+3. **📊 SMA Crossover**: Trend reversal → Regular exit
+
+### **Configuration:**
+- `STOP_LOSS_PERCENT=0.03` (3% maximum loss per trade)
+- `TAKE_PROFIT_PERCENT=0.06` (6% profit target)
+- Risk management overrides SMA signals when triggered
+
+### **Example for LTC/USD:**
+- Entry: $119.28
+- Take Profit: $126.64 (+6%)
+- Stop Loss: $115.70 (-3%)
 
 ## 🕒 Trading Schedule
 
