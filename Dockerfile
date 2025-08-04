@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
 # Create logs directory
 RUN mkdir -p /app/logs
 
+# Force cache bust - Update timestamp
+RUN echo "Build timestamp: $(date)" > /tmp/build-timestamp
+
 # Upgrade pip and install requirements
 COPY requirements.txt .
 RUN pip install --upgrade pip
