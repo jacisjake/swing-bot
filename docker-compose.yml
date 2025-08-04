@@ -4,15 +4,17 @@ services:
     build: .
     container_name: alpaca-swing-bot
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      - ALPACA_LIVE_API_KEY=AKRG978ZNISA817UNE1C
-      - ALPACA_LIVE_API_SECRET=1mCvTHCR95ZJAcmvElQbGUf1umowwbm5dnEoyfB0
-      - STOCK_SYMBOL=NVDA
-      - CRYPTO_SYMBOL=LTC/USD
-      - STOCK_QUANTITY=1
-      - CRYPTO_QUANTITY=0.1
-      - STOP_LOSS_PERCENT=0.03
-      - TAKE_PROFIT_PERCENT=0.06
+      - STOCK_SYMBOL=${STOCK_SYMBOL:-NVDA}
+      - CRYPTO_SYMBOL=${CRYPTO_SYMBOL:-LTC/USD}
+      - STOCK_QUANTITY=${STOCK_QUANTITY:-1}
+      - MAX_PORTFOLIO_PERCENT=${MAX_PORTFOLIO_PERCENT:-0.10}
+      - STOP_LOSS_PERCENT=${STOP_LOSS_PERCENT:-0.005}
+      - TAKE_PROFIT_1=${TAKE_PROFIT_1:-0.005}
+      - TAKE_PROFIT_2=${TAKE_PROFIT_2:-0.010}
+      - TAKE_PROFIT_3=${TAKE_PROFIT_3:-0.015}
     volumes:
       - ./logs:/app/logs
       - /etc/localtime:/etc/localtime:ro
