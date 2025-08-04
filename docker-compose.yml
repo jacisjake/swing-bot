@@ -4,17 +4,21 @@ services:
     build: .
     container_name: alpaca-swing-bot
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
-      - STOCK_SYMBOL=${STOCK_SYMBOL:-NVDA}
-      - CRYPTO_SYMBOL=${CRYPTO_SYMBOL:-LTC/USD}
-      - STOCK_QUANTITY=${STOCK_QUANTITY:-1}
-      - MAX_PORTFOLIO_PERCENT=${MAX_PORTFOLIO_PERCENT:-0.10}
-      - STOP_LOSS_PERCENT=${STOP_LOSS_PERCENT:-0.005}
-      - TAKE_PROFIT_1=${TAKE_PROFIT_1:-0.005}
-      - TAKE_PROFIT_2=${TAKE_PROFIT_2:-0.010}
-      - TAKE_PROFIT_3=${TAKE_PROFIT_3:-0.015}
+      # API Keys - REPLACE WITH YOUR ACTUAL KEYS
+      - ALPACA_LIVE_API_KEY=your_live_api_key_here
+      - ALPACA_LIVE_API_SECRET=your_live_secret_key_here
+      # Trading Symbols
+      - STOCK_SYMBOL=NVDA
+      - CRYPTO_SYMBOL=LTC/USD
+      # Position Sizes
+      - STOCK_QUANTITY=1
+      # LTC Scalping Strategy Settings
+      - MAX_PORTFOLIO_PERCENT=0.10
+      - STOP_LOSS_PERCENT=0.005
+      - TAKE_PROFIT_1=0.005
+      - TAKE_PROFIT_2=0.010
+      - TAKE_PROFIT_3=0.015
     volumes:
       - ./logs:/app/logs
       - /etc/localtime:/etc/localtime:ro

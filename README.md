@@ -31,33 +31,44 @@ simple_swinger/
 - Crypto trading enabled on your Alpaca account
 
 ### 2. Configuration
-Replace the placeholder API keys in `docker-compose.yml`:
+Replace the API keys in `docker-compose.yml`:
 ```yaml
 environment:
-  - ALPACA_LIVE_API_KEY=your_live_api_key
-  - ALPACA_LIVE_API_SECRET=your_live_secret_key
-  - STOCK_SYMBOL=NVDA           # Stock for market hours
-  - CRYPTO_SYMBOL=LTC/USD       # Crypto for after hours  
-  - STOCK_QUANTITY=1            # Number of stock shares
-  - CRYPTO_QUANTITY=0.1         # Amount of crypto to trade
-  - STOP_LOSS_PERCENT=0.03      # 3% stop loss
-  - TAKE_PROFIT_PERCENT=0.06    # 6% take profit
+  # API Keys - REPLACE WITH YOUR ACTUAL KEYS
+  - ALPACA_LIVE_API_KEY=your_live_api_key_here
+  - ALPACA_LIVE_API_SECRET=your_live_secret_key_here
+  # Trading Settings
+  - STOCK_SYMBOL=NVDA                # Stock for market hours
+  - CRYPTO_SYMBOL=LTC/USD            # Crypto for 24/7 trading
+  - STOCK_QUANTITY=1                 # NVDA shares per trade
+  - MAX_PORTFOLIO_PERCENT=0.10       # 10% max per asset
+  - STOP_LOSS_PERCENT=0.005          # 0.5% stop loss
+  - TAKE_PROFIT_1=0.005              # 0.5% first take profit
+  - TAKE_PROFIT_2=0.010              # 1.0% second take profit
+  - TAKE_PROFIT_3=0.015              # 1.5% third take profit
 ```
 
 ### 3. Deploy via Portainer
 1. Log into Portainer
 2. Go to **Stacks → Add Stack**
 3. Name: `simple-swinger`
-4. Paste the `docker-compose.yml` content
-5. Deploy the stack
+4. **Edit the API keys** in the compose content before deploying
+5. Paste the updated `docker-compose.yml` content
+6. Deploy the stack
 
-## 📊 Trading Strategy
+## 📊 Dual Trading Strategy
 
-- **Timeframe**: Daily bars for stocks, hourly for crypto
-- **Indicators**: 10-day SMA vs 20-day SMA crossover
-- **Market Hours**: NVDA stock (9:30 AM - 4:00 PM ET, Mon-Fri)
-- **After Hours**: LTC/USD crypto (24/7 when market closed)
-- **Execution**: Runs every 10 minutes
+### **LTC 5-Minute Scalping (24/7):**
+- **Timeframe**: 5-minute candles
+- **Indicators**: EMA 9/21 crossover + green candle confirmation
+- **Exits**: Scaled (33%/33%/34%) at 0.5%/1.0%/1.5%
+- **Risk**: 0.5% stop loss, 10% portfolio limit
+
+### **NVDA Daily Trading (Market Hours):**
+- **Timeframe**: Daily bars
+- **Indicators**: EMA 9/21 crossover
+- **Risk Management**: 6% take profit / 3% stop loss
+- **Schedule**: Every 5 minutes (2.5min offset from LTC)
 - **Order Type**: Market orders
 
 ## 🛡️ Risk Management
