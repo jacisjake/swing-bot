@@ -4,8 +4,8 @@ import logging
 import time
 import schedule
 from datetime import datetime, timedelta
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
@@ -25,28 +25,88 @@ logger = logging.getLogger(__name__)
 # API credentials
 API_KEY = os.getenv("ALPACA_LIVE_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_LIVE_API_SECRET")
-SYMBOL = os.getenv("TRADING_SYMBOL", "AAPL")  # Default to AAPL if not set
-QTY = int(os.getenv("TRADING_QUANTITY", "1"))  # Default to 1 if not set
+
+# Trading symbols
+STOCK_SYMBOL = os.getenv("STOCK_SYMBOL", "NVDA")  # Stock for market hours
+CRYPTO_SYMBOL = os.getenv("CRYPTO_SYMBOL", "LTC/USD")  # Crypto for after hours
+STOCK_QTY = int(os.getenv("STOCK_QUANTITY", "1"))  # Stock quantity
+CRYPTO_QTY = float(os.getenv("CRYPTO_QUANTITY", "0.1"))  # Crypto quantity (smaller amounts)
 
 # Initialize clients (LIVE trading)
-data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
+stock_data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
+crypto_data_client = CryptoHistoricalDataClient(API_KEY, SECRET_KEY)
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=False)
 
 # Strategy
 SHORT_SMA = 10
 LONG_SMA = 20
 
+def is_market_hours():
+    """Check if it's during US stock market hours (9:30 AM - 4:00 PM ET, Mon-Fri)"""
+    from datetime import datetime
+    import pytz
+    
+    et = pytz.timezone('US/Eastern')
+    now_et = datetime.now(et)
+    
+    # Check if it's a weekday (0=Monday, 4=Friday)
+    if now_et.weekday() > 4:  # Saturday (5) or Sunday (6)
+        return False
+    
+    # Check if it's between 9:30 AM and 4:00 PM ET
+    market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    
+    return market_open <= now_et <= market_close
+
+def get_current_symbol_and_qty():
+    """Get the appropriate symbol and quantity based on market hours"""
+    if is_market_hours():
+        return STOCK_SYMBOL, STOCK_QTY, "stock"
+    else:
+        return CRYPTO_SYMBOL, CRYPTO_QTY, "crypto"
+
 def fetch_data():
+    symbol, qty, asset_type = get_current_symbol_and_qty()
+    
     try:
         start = datetime.now() - timedelta(days=60)
-        bars = data_client.get_stock_bars(
-            StockBarsRequest(symbol_or_symbols=SYMBOL, timeframe=TimeFrame.Day, start=start)
-        ).df
-        logger.info(f"Fetched {len(bars)} bars for {SYMBOL}")
-        return bars[bars["symbol"] == SYMBOL]
+        
+        if asset_type == "stock":
+            request = StockBarsRequest(
+                symbol_or_symbols=[symbol], 
+                timeframe=TimeFrame.Day, 
+                start=start
+            )
+            bars_response = stock_data_client.get_stock_bars(request)
+        else:  # crypto
+            request = CryptoBarsRequest(
+                symbol_or_symbols=[symbol], 
+                timeframe=TimeFrame.Hour,  # Use hourly data for crypto (more active)
+                start=start
+            )
+            bars_response = crypto_data_client.get_crypto_bars(request)
+        
+        # Convert to DataFrame and handle the multi-index
+        df = bars_response.df
+        
+        # If there's a symbol level in the index, get data for our symbol
+        if symbol in df.index.get_level_values(0):
+            df = df.loc[symbol].copy()
+        elif hasattr(df.index, 'get_level_values') and len(df.index.get_level_values(0)) > 0:
+            # If multi-index but different structure, try to extract our symbol
+            df = df.xs(symbol, level=0) if symbol in df.index.get_level_values(0) else df
+        
+        logger.info(f"Fetched {len(df)} bars for {symbol} ({asset_type})")
+        logger.info(f"Data columns: {list(df.columns)}")
+        logger.info(f"Latest close price: ${df['close'].iloc[-1]:.2f}")
+        
+        return df, symbol, qty, asset_type
     except Exception as e:
         logger.error(f"Error fetching data: {e}")
-        return None
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return None, symbol, qty, asset_type
 
 def analyze(df):
     try:
@@ -72,7 +132,7 @@ def analyze(df):
         logger.error(f"Error in analysis: {e}")
         return 0
 
-def place_order(signal):
+def place_order(signal, symbol, qty, asset_type):
     try:
         if signal == 0:
             logger.info("✅ No signal.")
@@ -80,12 +140,12 @@ def place_order(signal):
             
         # Check current position first
         try:
-            position = trading_client.get_position(SYMBOL)
+            position = trading_client.get_position(symbol)
             current_qty = float(position.qty) if position else 0
-            logger.info(f"Current position in {SYMBOL}: {current_qty} shares")
+            logger.info(f"Current position in {symbol}: {current_qty} shares/units")
         except Exception:
             current_qty = 0
-            logger.info(f"No current position in {SYMBOL}")
+            logger.info(f"No current position in {symbol}")
             
         # Determine if we should place order
         if signal == 1 and current_qty <= 0:  # Buy signal and no long position
@@ -96,19 +156,22 @@ def place_order(signal):
             logger.info(f"Signal {signal} ignored due to existing position")
             return
             
-        order = MarketOrderRequest(symbol=SYMBOL, qty=QTY, side=side, time_in_force=TimeInForce.GTC)
+        order = MarketOrderRequest(symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.GTC)
         result = trading_client.submit_order(order)
-        logger.info(f"📈 Placed {side.value.upper()} order for {SYMBOL} - Order ID: {result.id}")
+        logger.info(f"📈 Placed {side.value.upper()} order for {symbol} - Order ID: {result.id}")
         
     except Exception as e:
         logger.error(f"Error placing order: {e}")
 
 def run():
-    logger.info(f"🚦 Running bot for {SYMBOL}")
+    symbol, qty, asset_type = get_current_symbol_and_qty()
+    market_status = "MARKET HOURS" if asset_type == "stock" else "AFTER HOURS"
+    
+    logger.info(f"🚦 Running bot for {symbol} ({asset_type.upper()}) - {market_status}")
     try:
-        df = fetch_data()
+        df, symbol, qty, asset_type = fetch_data()
         signal = analyze(df)
-        place_order(signal)
+        place_order(signal, symbol, qty, asset_type)
         logger.info("Trading cycle completed successfully")
     except Exception as e:
         logger.error(f"Error in trading cycle: {e}")
@@ -117,8 +180,9 @@ if __name__ == "__main__":
     # Create logs directory if it doesn't exist
     os.makedirs('/app/logs', exist_ok=True)
     
-    logger.info("🚀 Starting Alpaca Swing Trading Bot")
-    logger.info(f"Trading symbol: {SYMBOL}")
+    logger.info("🚀 Starting Alpaca Multi-Asset Swing Trading Bot")
+    logger.info(f"Stock symbol (market hours): {STOCK_SYMBOL}")
+    logger.info(f"Crypto symbol (after hours): {CRYPTO_SYMBOL}")
     logger.info("⚠️  LIVE TRADING MODE - Real money at risk!")
     
     # Schedule the bot to run every 10 minutes

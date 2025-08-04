@@ -7,8 +7,10 @@ services:
     environment:
       - ALPACA_LIVE_API_KEY=AKRG978ZNISA817UNE1C
       - ALPACA_LIVE_API_SECRET=1mCvTHCR95ZJAcmvElQbGUf1umowwbm5dnEoyfB0
-      - TRADING_SYMBOL=NVDA
-      - TRADING_QUANTITY=1
+      - STOCK_SYMBOL=NVDA
+      - CRYPTO_SYMBOL=LTC/USD
+      - STOCK_QUANTITY=1
+      - CRYPTO_QUANTITY=0.1
     volumes:
       - ./logs:/app/logs
       - /etc/localtime:/etc/localtime:ro
