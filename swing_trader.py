@@ -27,6 +27,15 @@ logger = logging.getLogger(__name__)
 API_KEY = os.getenv("ALPACA_LIVE_API_KEY")
 SECRET_KEY = os.getenv("ALPACA_LIVE_API_SECRET")
 
+# Debug: Check if API keys are loaded
+if not API_KEY or not SECRET_KEY:
+    logger.error("❌ API keys not found in environment variables!")
+    logger.error(f"API_KEY loaded: {'✅' if API_KEY else '❌'}")
+    logger.error(f"SECRET_KEY loaded: {'✅' if SECRET_KEY else '❌'}")
+    logger.error("💡 Check Portainer stack environment variables or .env file mounting")
+else:
+    logger.info(f"✅ API keys loaded: API_KEY={API_KEY[:8]}..., SECRET_KEY={'*' * len(SECRET_KEY) if SECRET_KEY else 'None'}")
+
 # Trading symbols
 STOCK_SYMBOL = os.getenv("STOCK_SYMBOL", "NVDA")
 CRYPTO_SYMBOL = os.getenv("CRYPTO_SYMBOL", "LTC/USD")
@@ -103,6 +112,20 @@ def calculate_ema(data, period):
 def validate_api_access():
     """Validate API access for both stock and crypto data"""
     try:
+        # Debug: Show environment variables
+        logger.info("🔍 Environment Variables Debug:")
+        alpaca_vars = {k: v for k, v in os.environ.items() if 'ALPACA' in k.upper()}
+        if alpaca_vars:
+            for key, value in alpaca_vars.items():
+                masked_value = value[:8] + "..." if len(value) > 8 else "***" if value else "None"
+                logger.info(f"  {key}: {masked_value}")
+        else:
+            logger.error("❌ No ALPACA environment variables found!")
+            
+        if not API_KEY or not SECRET_KEY:
+            logger.error("❌ Cannot proceed without valid API credentials")
+            return False
+        
         # Test account access
         account = trading_client.get_account()
         logger.info(f"✅ Account access validated. Portfolio: ${float(account.portfolio_value):.2f}")

@@ -5,9 +5,11 @@ services:
     container_name: alpaca-swing-bot
     restart: unless-stopped
     environment:
-      # API Keys - REPLACE WITH YOUR ACTUAL KEYS
-      - ALPACA_LIVE_API_KEY=your_live_api_key_here
-      - ALPACA_LIVE_API_SECRET=your_live_secret_key_here
+      # ⚠️  CRITICAL: REPLACE THESE WITH YOUR ACTUAL ALPACA API KEYS ⚠️
+      # Option 1: Replace values below with real keys
+      # Option 2: Override in Portainer stack environment variables
+      - ALPACA_LIVE_API_KEY=${ALPACA_LIVE_API_KEY:-your_live_api_key_here}
+      - ALPACA_LIVE_API_SECRET=${ALPACA_LIVE_API_SECRET:-your_live_secret_key_here}
       # Trading Symbols
       - STOCK_SYMBOL=NVDA
       - CRYPTO_SYMBOL=LTC/USD
