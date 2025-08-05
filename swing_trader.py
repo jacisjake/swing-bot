@@ -100,6 +100,43 @@ def calculate_ema(data, period):
     """Calculate Exponential Moving Average"""
     return data.ewm(span=period, adjust=False).mean()
 
+def validate_api_access():
+    """Validate API access for both stock and crypto data"""
+    try:
+        # Test account access
+        account = trading_client.get_account()
+        logger.info(f"✅ Account access validated. Portfolio: ${float(account.portfolio_value):.2f}")
+        
+        # Test stock data access
+        try:
+            test_stock_request = StockBarsRequest(
+                symbol_or_symbols=["AAPL"], 
+                timeframe=TimeFrame(1, TimeFrameUnit.Day),
+                start=datetime.now() - timedelta(days=2)
+            )
+            stock_data_client.get_stock_bars(test_stock_request)
+            logger.info("✅ Stock data access validated")
+        except Exception as e:
+            logger.error(f"❌ Stock data access failed: {e}")
+            
+        # Test crypto data access
+        try:
+            test_crypto_request = CryptoBarsRequest(
+                symbol_or_symbols=["BTC/USD"], 
+                timeframe=TimeFrame(1, TimeFrameUnit.Hour),
+                start=datetime.now() - timedelta(days=1)
+            )
+            crypto_data_client.get_crypto_bars(test_crypto_request)
+            logger.info("✅ Crypto data access validated")
+        except Exception as e:
+            logger.error(f"❌ Crypto data access failed: {e}")
+            logger.error("💡 Your API keys may not have crypto data access. Check Alpaca account permissions.")
+            
+    except Exception as e:
+        logger.error(f"❌ API validation failed: {e}")
+        return False
+    return True
+
 # =============================================================================
 # LTC SCALPING STRATEGY (24/7)
 # =============================================================================
@@ -140,11 +177,15 @@ def fetch_ltc_data():
     try:
         start = datetime.now() - timedelta(days=7)
         
+        logger.info(f"🔗 [LTC] Requesting data from {start} to now")
+        
         request = CryptoBarsRequest(
             symbol_or_symbols=[CRYPTO_SYMBOL], 
             timeframe=TimeFrame(5, TimeFrameUnit.Minute),
             start=start
         )
+        
+        logger.info(f"🔗 [LTC] Making API call for {CRYPTO_SYMBOL}")
         bars_response = crypto_data_client.get_crypto_bars(request)
         df = bars_response.df
         
@@ -262,6 +303,7 @@ def run_ltc_scalping():
         
         df = fetch_ltc_data()
         if df is None:
+            logger.warning("⚠️ [LTC] No data available - skipping cycle")
             return
             
         current_price = df['close'].iloc[-1]
@@ -294,6 +336,7 @@ def run_ltc_scalping():
         
     except Exception as e:
         logger.error(f"Error in LTC scalping: {e}")
+        logger.info("⚠️ [LTC] Continuing with reduced functionality...")
 
 # =============================================================================
 # NVDA STOCK STRATEGY (Market Hours Only)
@@ -464,6 +507,12 @@ def main():
     logger.info(f"📈 NVDA 5-min trading (market hours): EMA {FAST_EMA}/{SLOW_EMA}, 6% TP / 3% SL")
     logger.info(f"💰 LTC Targets: {TAKE_PROFIT_1:.1%}, {TAKE_PROFIT_2:.1%}, {TAKE_PROFIT_3:.1%} | SL: {STOP_LOSS_PERCENT:.1%}")
     logger.info("⚠️  LIVE TRADING MODE - Real money at risk!")
+    
+    # Validate API access before starting
+    logger.info("🔍 Validating API access...")
+    if not validate_api_access():
+        logger.error("❌ API validation failed. Exiting.")
+        return
     
     # Run initial cycles
     run_ltc_scalping()
