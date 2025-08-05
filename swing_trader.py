@@ -182,7 +182,17 @@ def check_existing_positions():
             market_value = float(position.market_value)
             unrealized_pl = float(position.unrealized_pl)
             unrealized_plpc = float(position.unrealized_plpc) * 100
-            avg_entry_price = float(position.avg_fill_price)
+            
+            # Try different attribute names for entry price
+            avg_entry_price = None
+            if hasattr(position, 'avg_fill_price'):
+                avg_entry_price = float(position.avg_fill_price)
+            elif hasattr(position, 'avg_entry_price'):
+                avg_entry_price = float(position.avg_entry_price)
+            elif hasattr(position, 'cost_basis'):
+                avg_entry_price = float(position.cost_basis) / abs(qty)
+            else:
+                avg_entry_price = abs(float(market_value)) / abs(qty)  # Fallback calculation
             
             total_position_value += abs(market_value)
             
@@ -204,6 +214,14 @@ def check_existing_positions():
         
     except Exception as e:
         logger.error(f"Error checking existing positions: {e}")
+        # Debug: Show position attributes
+        try:
+            positions = trading_client.get_all_positions()
+            if positions:
+                sample_position = positions[0]
+                logger.info(f"🔍 Position attributes: {[attr for attr in dir(sample_position) if not attr.startswith('_')]}")
+        except:
+            pass
 
 # =============================================================================
 # LTC SCALPING STRATEGY (24/7)
@@ -473,7 +491,16 @@ def manage_nvda_position(current_price):
             if not position:
                 return False, "No NVDA position"
                 
-            entry_price = float(position.avg_fill_price)
+            # Try different attribute names for entry price
+            if hasattr(position, 'avg_fill_price'):
+                entry_price = float(position.avg_fill_price)
+            elif hasattr(position, 'avg_entry_price'):
+                entry_price = float(position.avg_entry_price)
+            elif hasattr(position, 'cost_basis'):
+                entry_price = float(position.cost_basis) / abs(float(position.qty))
+            else:
+                entry_price = abs(float(position.market_value)) / abs(float(position.qty))
+                
             current_qty = float(position.qty)
             
             if current_qty > 0:  # Long position
