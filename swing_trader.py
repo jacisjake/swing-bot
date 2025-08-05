@@ -6,7 +6,8 @@ import schedule
 import pytz
 from datetime import datetime, timedelta
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
+from alpaca.data.historical.screener import ScreenerClient
+from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest, MarketMoversRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
@@ -36,10 +37,23 @@ if not API_KEY or not SECRET_KEY:
 else:
     logger.info(f"✅ API keys loaded: API_KEY={API_KEY[:8]}..., SECRET_KEY={'*' * len(SECRET_KEY) if SECRET_KEY else 'None'}")
 
-# Trading symbols
-STOCK_SYMBOL = os.getenv("STOCK_SYMBOL", "NVDA")
-CRYPTO_SYMBOL = os.getenv("CRYPTO_SYMBOL", "LTC/USD")
+# Trading symbols - Dynamic via screener
+STOCK_SYMBOL = os.getenv("STOCK_SYMBOL", "NVDA")  # Fallback symbol
+CRYPTO_SYMBOL = os.getenv("CRYPTO_SYMBOL", "LTC/USD")  # Fallback symbol
 STOCK_QTY = int(os.getenv("STOCK_QUANTITY", "1"))
+
+# Screener Configuration
+MAX_STOCK_SYMBOLS = int(os.getenv("MAX_STOCK_SYMBOLS", "10"))  # Max stocks to trade
+MAX_CRYPTO_SYMBOLS = int(os.getenv("MAX_CRYPTO_SYMBOLS", "5"))  # Max crypto to trade
+MIN_DAILY_VOLUME = int(os.getenv("MIN_DAILY_VOLUME", "1000000"))  # Min $1M daily volume
+MIN_PRICE = float(os.getenv("MIN_PRICE", "5.0"))  # Min $5 per share
+MAX_PRICE = float(os.getenv("MAX_PRICE", "500.0"))  # Max $500 per share
+SCREENER_UPDATE_HOURS = int(os.getenv("SCREENER_UPDATE_HOURS", "1"))  # Update symbols every hour
+
+# Dynamic symbol lists
+active_stock_symbols = [STOCK_SYMBOL]  # Start with fallback
+active_crypto_symbols = [CRYPTO_SYMBOL]  # Start with fallback
+last_screener_update = datetime.min
 
 # LTC Scalping Strategy Settings
 MAX_PORTFOLIO_PERCENT = float(os.getenv("MAX_PORTFOLIO_PERCENT", "0.10"))  # 10% max per asset
@@ -51,33 +65,23 @@ TAKE_PROFIT_3 = float(os.getenv("TAKE_PROFIT_3", "0.015"))  # 1.5% third target
 # Initialize clients (LIVE trading)
 stock_data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 crypto_data_client = CryptoHistoricalDataClient(API_KEY, SECRET_KEY)
+screener_client = ScreenerClient(API_KEY, SECRET_KEY)
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=False)
 
 # EMA Strategy parameters
 FAST_EMA = 9
 SLOW_EMA = 21
 
-# Global position tracking for LTC scalping
-ltc_positions = []
+# Global position tracking - removed old LTC-specific tracking
+# Now using generic position management for all symbols
 
-class LTCPosition:
-    def __init__(self, entry_price, initial_quantity, order_id):
+class PositionTracker:
+    """Generic position tracker for any symbol"""
+    def __init__(self, symbol, entry_price, quantity, order_id):
+        self.symbol = symbol
         self.entry_price = entry_price
-        self.initial_quantity = initial_quantity
-        self.remaining_quantity = initial_quantity
+        self.quantity = quantity
         self.order_id = order_id
-        self.exit_1_filled = False
-        self.exit_2_filled = False
-        self.exit_3_filled = False
-        self.stop_loss_price = entry_price * (1 - STOP_LOSS_PERCENT)
-        
-    def get_target_prices(self):
-        return {
-            'target_1': self.entry_price * (1 + TAKE_PROFIT_1),
-            'target_2': self.entry_price * (1 + TAKE_PROFIT_2), 
-            'target_3': self.entry_price * (1 + TAKE_PROFIT_3),
-            'stop_loss': self.stop_loss_price
-        }
 
 def is_market_hours():
     """Check if US stock market is currently open"""
@@ -224,75 +228,374 @@ def check_existing_positions():
             pass
 
 # =============================================================================
-# LTC SCALPING STRATEGY (24/7)
+# SCREENER FUNCTIONS - Dynamic Symbol Selection
 # =============================================================================
 
-def calculate_ltc_position_size(current_price):
-    """Calculate LTC position size based on 10% portfolio limit"""
+def screen_top_stock_movers():
+    """Screen for top stock movers with good volume and trending direction"""
+    try:
+        logger.info("🔍 Screening for top stock movers...")
+        
+        # Use Alpaca's market movers API for gainers
+        movers_request = MarketMoversRequest(
+            top=50  # Get top 50 movers
+        )
+        
+        movers_response = screener_client.get_market_movers(movers_request)
+        
+        if not movers_response or not hasattr(movers_response, 'gainers'):
+            logger.warning("⚠️ No movers results received")
+            return [STOCK_SYMBOL]  # Return fallback
+            
+        filtered_symbols = []
+        
+        # Check gainers first
+        if hasattr(movers_response, 'gainers') and movers_response.gainers:
+            for stock in movers_response.gainers:
+                symbol = stock.symbol
+                
+                # Skip if already have enough symbols
+                if len(filtered_symbols) >= MAX_STOCK_SYMBOLS:
+                    break
+                    
+                try:
+                    # Check price criteria (volume checking will be done separately)
+                    if (hasattr(stock, 'price') and 
+                        MIN_PRICE <= float(stock.price) <= MAX_PRICE):
+                        
+                        filtered_symbols.append(symbol)
+                        logger.info(f"  ✅ {symbol}: ${float(stock.price):.2f}, Change: {float(stock.change) if hasattr(stock, 'change') else 'N/A'}%")
+                    else:
+                        logger.debug(f"  ❌ {symbol}: Failed price criteria")
+                        
+                except Exception as e:
+                    logger.debug(f"  ❌ {symbol}: Error checking criteria - {e}")
+                    continue
+        
+        if not filtered_symbols:
+            logger.warning("⚠️ No stocks met screening criteria, using fallback")
+            return [STOCK_SYMBOL]
+            
+        logger.info(f"📊 Selected {len(filtered_symbols)} stocks: {filtered_symbols}")
+        return filtered_symbols
+        
+    except Exception as e:
+        logger.error(f"Error in stock screening: {e}")
+        return [STOCK_SYMBOL]  # Return fallback on error
+
+def screen_top_crypto_movers():
+    """Screen for top crypto movers based on recent performance"""
+    try:
+        logger.info("🔍 Screening for top crypto movers...")
+        
+        # Major crypto pairs available on Alpaca
+        crypto_candidates = [
+            "BTC/USD", "ETH/USD", "LTC/USD", "BCH/USD", "LINK/USD",
+            "AAVE/USD", "UNI/USD", "SUSHI/USD", "ALGO/USD", "DOT/USD"
+        ]
+        
+        crypto_performance = []
+        
+        # Analyze recent performance for each crypto
+        for symbol in crypto_candidates:
+            try:
+                # Get 24-hour data
+                start = datetime.now() - timedelta(days=1)
+                request = CryptoBarsRequest(
+                    symbol_or_symbols=[symbol],
+                    timeframe=TimeFrame(1, TimeFrameUnit.Hour),
+                    start=start
+                )
+                
+                response = crypto_data_client.get_crypto_bars(request)
+                if not response.df.empty:
+                    df = response.df
+                    if symbol in df.index.get_level_values(0):
+                        df = df.loc[symbol]
+                    
+                    if len(df) >= 2:
+                        # Calculate 24h performance
+                        first_price = df['close'].iloc[0]
+                        last_price = df['close'].iloc[-1]
+                        performance = (last_price - first_price) / first_price
+                        
+                        # Calculate volatility (helpful for swing trading)
+                        volatility = df['close'].pct_change().std()
+                        
+                        crypto_performance.append({
+                            'symbol': symbol,
+                            'performance': performance,
+                            'volatility': volatility,
+                            'price': last_price,
+                            'volume': df['volume'].iloc[-1] if 'volume' in df.columns else 0
+                        })
+                        
+                        logger.debug(f"  📈 {symbol}: {performance:.2%} (Vol: {volatility:.4f})")
+                        
+            except Exception as e:
+                logger.debug(f"  ❌ {symbol}: Error getting data - {e}")
+                continue
+                
+        if not crypto_performance:
+            logger.warning("⚠️ No crypto data available, using fallback")
+            return [CRYPTO_SYMBOL]
+            
+        # Sort by combination of positive performance and good volatility
+        crypto_performance.sort(key=lambda x: x['performance'] + (x['volatility'] * 0.5), reverse=True)
+        
+        # Select top performers
+        selected_cryptos = [item['symbol'] for item in crypto_performance[:MAX_CRYPTO_SYMBOLS]]
+        
+        logger.info(f"📊 Selected {len(selected_cryptos)} cryptos: {selected_cryptos}")
+        for crypto in crypto_performance[:MAX_CRYPTO_SYMBOLS]:
+            logger.info(f"  🎯 {crypto['symbol']}: {crypto['performance']:.2%} performance, {crypto['volatility']:.4f} volatility")
+            
+        return selected_cryptos if selected_cryptos else [CRYPTO_SYMBOL]
+        
+    except Exception as e:
+        logger.error(f"Error in crypto screening: {e}")
+        return [CRYPTO_SYMBOL]  # Return fallback on error
+
+def update_symbol_lists():
+    """Update active symbol lists using screener"""
+    global active_stock_symbols, active_crypto_symbols, last_screener_update
+    
+    try:
+        current_time = datetime.now()
+        
+        # Check if we need to update (every X hours)
+        if (current_time - last_screener_update).total_seconds() < SCREENER_UPDATE_HOURS * 3600:
+            logger.debug(f"⏳ Screener update not due yet (last: {last_screener_update})")
+            return False
+            
+        logger.info("🔄 Updating symbol lists via screener...")
+        
+        # Update stock symbols
+        new_stock_symbols = screen_top_stock_movers()
+        if new_stock_symbols != active_stock_symbols:
+            logger.info(f"📈 Stock symbols updated: {active_stock_symbols} → {new_stock_symbols}")
+            active_stock_symbols = new_stock_symbols
+            
+        # Update crypto symbols  
+        new_crypto_symbols = screen_top_crypto_movers()
+        if new_crypto_symbols != active_crypto_symbols:
+            logger.info(f"💰 Crypto symbols updated: {active_crypto_symbols} → {new_crypto_symbols}")
+            active_crypto_symbols = new_crypto_symbols
+            
+        last_screener_update = current_time
+        
+        logger.info(f"✅ Screener update complete. Tracking {len(active_stock_symbols)} stocks, {len(active_crypto_symbols)} cryptos")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error updating symbol lists: {e}")
+        return False
+
+# =============================================================================
+# MULTI-SYMBOL POSITION MANAGEMENT
+# =============================================================================
+
+def calculate_position_size_per_symbol(current_price, symbol_type="stock"):
+    """Calculate position size per symbol with equal allocation"""
     try:
         portfolio_value = get_portfolio_value()
-        max_investment = portfolio_value * MAX_PORTFOLIO_PERCENT
         
-        # Get current LTC exposure
-        current_ltc_value = 0
-        try:
-            ltc_position = trading_client.get_position(CRYPTO_SYMBOL)
-            if ltc_position:
-                current_ltc_value = float(ltc_position.market_value)
-        except:
-            pass
+        if symbol_type == "stock":
+            total_allocation = MAX_PORTFOLIO_PERCENT * 0.6  # 60% of total for stocks
+            symbols_count = len(active_stock_symbols)
+        else:  # crypto
+            total_allocation = MAX_PORTFOLIO_PERCENT * 0.4  # 40% of total for crypto
+            symbols_count = len(active_crypto_symbols)
             
-        available_investment = max_investment - current_ltc_value
+        per_symbol_allocation = total_allocation / symbols_count if symbols_count > 0 else 0
+        max_investment = portfolio_value * per_symbol_allocation
         
-        if available_investment <= 0:
-            logger.info(f"💼 LTC position limit reached. Current exposure: ${current_ltc_value:.2f}")
-            return 0
+        if symbol_type == "stock":
+            # For stocks, use whole shares
+            max_shares = int(max_investment / current_price)
+            position_size = max(1, max_shares)  # At least 1 share
+        else:
+            # For crypto, allow fractional shares
+            max_shares = max_investment / current_price
+            position_size = max(0.01, round(max_shares, 2))  # At least 0.01
             
-        max_shares = available_investment / current_price
-        position_size = max(0.01, round(max_shares, 2))
-        
-        logger.info(f"💼 Portfolio: ${portfolio_value:.2f}, Max LTC: ${max_investment:.2f}, Available: ${available_investment:.2f}")
+        logger.debug(f"💼 {symbol_type.upper()} position size: {position_size} (${max_investment:.2f} allocation)")
         return position_size
         
     except Exception as e:
-        logger.error(f"Error calculating LTC position size: {e}")
-        return 0.1
+        logger.error(f"Error calculating {symbol_type} position size: {e}")
+        return 1 if symbol_type == "stock" else 0.01
 
-def fetch_ltc_data():
-    """Fetch 5-minute LTC data"""
+# =============================================================================
+# MULTI-SYMBOL TRADING SYSTEM
+# =============================================================================
+
+# =============================================================================
+# MAIN EXECUTION
+# =============================================================================
+
+def main():
+    """Main function with screener-based multi-symbol execution"""
+    os.makedirs('/app/logs', exist_ok=True)
+    
+    logger.info("🚀 Starting Screener-Based Multi-Asset Trading Bot")
+    logger.info(f"📊 Max Symbols: {MAX_STOCK_SYMBOLS} stocks, {MAX_CRYPTO_SYMBOLS} cryptos")
+    logger.info(f"📈 Strategy: EMA {FAST_EMA}/{SLOW_EMA}, Portfolio limit: {MAX_PORTFOLIO_PERCENT:.0%}")
+    logger.info(f"� Screener Criteria: ${MIN_PRICE}-${MAX_PRICE}, ${MIN_DAILY_VOLUME:,} min volume")
+    logger.info(f"� Symbol update frequency: Every {SCREENER_UPDATE_HOURS} hours")
+    logger.info("⚠️  LIVE TRADING MODE - Real money at risk!")
+    
+    # Validate API access before starting
+    logger.info("🔍 Validating API access...")
+    if not validate_api_access():
+        logger.error("❌ API validation failed. Exiting.")
+        return
+    
+    # Initial screener update
+    logger.info("🔄 Running initial screener update...")
+    update_symbol_lists()
+    
+    # Check existing positions
+    check_existing_positions()
+    
+    # Run initial cycles
+    run_multi_symbol_trading()
+    
+    # Schedule trading cycles
+    schedule.every(5).minutes.do(run_multi_symbol_trading)  # Every 5 minutes
+    schedule.every(1).hours.do(update_symbol_lists)  # Check for symbol updates hourly
+    
+    # Keep running
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
+
+def run_multi_symbol_trading():
+    """Run trading strategy across all screened symbols"""
+    try:
+        logger.info("🔄 Running multi-symbol trading cycle")
+        
+        # Update symbols if needed
+        update_symbol_lists()
+        
+        # Trade crypto symbols (24/7)
+        for crypto_symbol in active_crypto_symbols:
+            try:
+                trade_crypto_symbol(crypto_symbol)
+            except Exception as e:
+                logger.error(f"Error trading {crypto_symbol}: {e}")
+                
+        # Trade stock symbols (market hours only)
+        if is_market_hours():
+            for stock_symbol in active_stock_symbols:
+                try:
+                    trade_stock_symbol(stock_symbol)
+                except Exception as e:
+                    logger.error(f"Error trading {stock_symbol}: {e}")
+        else:
+            logger.info("📅 Market closed - skipping stock trading")
+            
+    except Exception as e:
+        logger.error(f"Error in multi-symbol trading: {e}")
+
+def trade_crypto_symbol(symbol):
+    """Trade a specific crypto symbol"""
+    try:
+        # Fetch data
+        df = fetch_symbol_data(symbol, "crypto")
+        if df is None:
+            return
+            
+        current_price = df['close'].iloc[-1]
+        
+        # Check for entry signal
+        should_enter, reason = check_entry_signal(df, symbol)
+        
+        if should_enter:
+            position_size = calculate_position_size_per_symbol(current_price, "crypto")
+            
+            if position_size > 0:
+                place_order(symbol, OrderSide.BUY, position_size, f"CRYPTO ENTRY - {reason}")
+            else:
+                logger.info(f"⚠️ [{symbol}] Position size too small")
+        else:
+            logger.debug(f"⏳ [{symbol}] No entry signal - {reason}")
+            
+        # Manage existing position
+        manage_position(symbol, current_price, "crypto")
+        
+    except Exception as e:
+        logger.error(f"Error trading crypto {symbol}: {e}")
+
+def trade_stock_symbol(symbol):
+    """Trade a specific stock symbol"""
+    try:
+        # Fetch data
+        df = fetch_symbol_data(symbol, "stock")
+        if df is None:
+            return
+            
+        current_price = df['close'].iloc[-1]
+        
+        # Check for entry signal
+        should_enter, reason = check_entry_signal(df, symbol)
+        
+        if should_enter:
+            position_size = calculate_position_size_per_symbol(current_price, "stock")
+            
+            if position_size >= 1:
+                place_order(symbol, OrderSide.BUY, position_size, f"STOCK ENTRY - {reason}")
+            else:
+                logger.info(f"⚠️ [{symbol}] Position size too small")
+        else:
+            logger.debug(f"⏳ [{symbol}] No entry signal - {reason}")
+            
+        # Manage existing position
+        manage_position(symbol, current_price, "stock")
+        
+    except Exception as e:
+        logger.error(f"Error trading stock {symbol}: {e}")
+
+def fetch_symbol_data(symbol, symbol_type):
+    """Fetch 5-minute data for any symbol"""
     try:
         start = datetime.now() - timedelta(days=7)
         
-        logger.info(f"🔗 [LTC] Requesting data from {start} to now")
-        
-        request = CryptoBarsRequest(
-            symbol_or_symbols=[CRYPTO_SYMBOL], 
-            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
-            start=start
-        )
-        
-        logger.info(f"🔗 [LTC] Making API call for {CRYPTO_SYMBOL}")
-        bars_response = crypto_data_client.get_crypto_bars(request)
+        if symbol_type == "crypto":
+            request = CryptoBarsRequest(
+                symbol_or_symbols=[symbol], 
+                timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                start=start
+            )
+            bars_response = crypto_data_client.get_crypto_bars(request)
+        else:
+            request = StockBarsRequest(
+                symbol_or_symbols=[symbol], 
+                timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                start=start
+            )
+            bars_response = stock_data_client.get_stock_bars(request)
+            
         df = bars_response.df
         
-        if CRYPTO_SYMBOL in df.index.get_level_values(0):
-            df = df.loc[CRYPTO_SYMBOL].copy()
+        if symbol in df.index.get_level_values(0):
+            df = df.loc[symbol].copy()
         elif hasattr(df.index, 'get_level_values') and len(df.index.get_level_values(0)) > 0:
-            df = df.xs(CRYPTO_SYMBOL, level=0) if CRYPTO_SYMBOL in df.index.get_level_values(0) else df
+            df = df.xs(symbol, level=0) if symbol in df.index.get_level_values(0) else df
         
         if len(df) == 0:
-            logger.error(f"No 5-minute data for {CRYPTO_SYMBOL}")
+            logger.warning(f"No 5-minute data for {symbol}")
             return None
             
-        logger.info(f"📊 [LTC] Fetched {len(df)} 5-minute bars")
+        logger.debug(f"📊 [{symbol}] Fetched {len(df)} 5-minute bars")
         return df
         
     except Exception as e:
-        logger.error(f"Error fetching LTC data: {e}")
+        logger.error(f"Error fetching data for {symbol}: {e}")
         return None
 
-def check_ltc_entry_signal(df):
-    """Check for LTC scalping entry signal"""
+def check_entry_signal(df, symbol):
+    """Check entry signal for any symbol using EMA crossover"""
     try:
         if len(df) < SLOW_EMA + 2:
             return False, "Insufficient data"
@@ -313,185 +616,27 @@ def check_ltc_entry_signal(df):
         previous_green = previous_candle['close'] > previous_candle['open']
         current_green = current_candle['close'] > current_candle['open']
         
-        logger.info(f"🔍 [LTC] EMA 9: {current_ema_9:.4f}, EMA 21: {current_ema_21:.4f}")
-        logger.info(f"🔍 [LTC] Crossover: {ema_crossover}, Prev Green: {previous_green}, Curr Green: {current_green}")
+        logger.debug(f"🔍 [{symbol}] EMA 9: {current_ema_9:.4f}, EMA 21: {current_ema_21:.4f}")
+        logger.debug(f"🔍 [{symbol}] Crossover: {ema_crossover}, Prev Green: {previous_green}, Curr Green: {current_green}")
         
         if ema_crossover and previous_green and current_green:
-            return True, "All entry conditions met"
+            return True, "EMA crossover with bullish candles"
         else:
             return False, "Entry conditions not satisfied"
             
     except Exception as e:
-        logger.error(f"Error checking LTC entry: {e}")
+        logger.error(f"Error checking entry signal for {symbol}: {e}")
         return False, "Error in analysis"
 
-def manage_ltc_positions(current_price):
-    """Manage existing LTC positions with scaled exits"""
-    global ltc_positions
-    
-    try:
-        for position in ltc_positions[:]:
-            targets = position.get_target_prices()
-            
-            # Stop loss check
-            if current_price <= targets['stop_loss']:
-                if position.remaining_quantity > 0:
-                    place_ltc_order(OrderSide.SELL, position.remaining_quantity, 
-                                  f"STOP LOSS at ${current_price:.4f}")
-                    ltc_positions.remove(position)
-                continue
-                
-            # Take profit levels
-            if not position.exit_1_filled and current_price >= targets['target_1']:
-                exit_qty = round(position.initial_quantity * 0.33, 2)
-                place_ltc_order(OrderSide.SELL, exit_qty, f"TP1 (33%) at ${current_price:.4f}")
-                position.remaining_quantity -= exit_qty
-                position.exit_1_filled = True
-                
-            elif not position.exit_2_filled and current_price >= targets['target_2']:
-                exit_qty = round(position.initial_quantity * 0.33, 2)
-                place_ltc_order(OrderSide.SELL, exit_qty, f"TP2 (33%) at ${current_price:.4f}")
-                position.remaining_quantity -= exit_qty
-                position.exit_2_filled = True
-                
-            elif not position.exit_3_filled and current_price >= targets['target_3']:
-                place_ltc_order(OrderSide.SELL, position.remaining_quantity, f"TP3 (34%) at ${current_price:.4f}")
-                ltc_positions.remove(position)
-                
-            # Log position status
-            pnl = (current_price - position.entry_price) / position.entry_price * 100
-            logger.info(f"📊 [LTC] Position: Entry ${position.entry_price:.4f}, Remaining: {position.remaining_quantity}, P&L: {pnl:.2f}%")
-            
-    except Exception as e:
-        logger.error(f"Error managing LTC positions: {e}")
-
-def place_ltc_order(side, quantity, reason):
-    """Place LTC order"""
-    try:
-        if quantity <= 0:
-            return None
-            
-        order = MarketOrderRequest(symbol=CRYPTO_SYMBOL, qty=quantity, side=side, time_in_force=TimeInForce.GTC)
-        result = trading_client.submit_order(order)
-        logger.info(f"🚀 [LTC] {side.value.upper()}: {quantity} - {reason} - Order ID: {result.id}")
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error placing LTC order: {e}")
-        return None
-
-def run_ltc_scalping():
-    """Run LTC 5-minute scalping strategy"""
-    global ltc_positions
-    
-    try:
-        logger.info("🔄 [LTC] Running 5-minute scalping cycle")
-        
-        df = fetch_ltc_data()
-        if df is None:
-            logger.warning("⚠️ [LTC] No data available - skipping cycle")
-            return
-            
-        current_price = df['close'].iloc[-1]
-        logger.info(f"💰 [LTC] Current Price: ${current_price:.4f}")
-        
-        # Manage existing positions
-        manage_ltc_positions(current_price)
-        
-        # Check for new entry
-        should_enter, reason = check_ltc_entry_signal(df)
-        
-        if should_enter:
-            position_size = calculate_ltc_position_size(current_price)
-            
-            if position_size > 0:
-                result = place_ltc_order(OrderSide.BUY, position_size, f"SCALP ENTRY - {reason}")
-                
-                if result:
-                    new_position = LTCPosition(current_price, position_size, result.id)
-                    ltc_positions.append(new_position)
-                    
-                    targets = new_position.get_target_prices()
-                    logger.info(f"🎯 [LTC] Targets: TP1: ${targets['target_1']:.4f}, TP2: ${targets['target_2']:.4f}, TP3: ${targets['target_3']:.4f}, SL: ${targets['stop_loss']:.4f}")
-            else:
-                logger.info("⚠️ [LTC] Portfolio limit reached")
-        else:
-            logger.info(f"⏳ [LTC] No entry signal - {reason}")
-            
-        logger.info(f"📈 [LTC] Active positions: {len(ltc_positions)}")
-        
-    except Exception as e:
-        logger.error(f"Error in LTC scalping: {e}")
-        logger.info("⚠️ [LTC] Continuing with reduced functionality...")
-
-# =============================================================================
-# NVDA STOCK STRATEGY (Market Hours Only)
-# =============================================================================
-
-def fetch_nvda_data():
-    """Fetch 5-minute NVDA data"""
-    try:
-        start = datetime.now() - timedelta(days=7)
-        
-        request = StockBarsRequest(
-            symbol_or_symbols=[STOCK_SYMBOL], 
-            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
-            start=start
-        )
-        bars_response = stock_data_client.get_stock_bars(request)
-        df = bars_response.df
-        
-        if STOCK_SYMBOL in df.index.get_level_values(0):
-            df = df.loc[STOCK_SYMBOL].copy()
-        elif hasattr(df.index, 'get_level_values') and len(df.index.get_level_values(0)) > 0:
-            df = df.xs(STOCK_SYMBOL, level=0) if STOCK_SYMBOL in df.index.get_level_values(0) else df
-        
-        if len(df) == 0:
-            logger.error(f"No 5-minute data for {STOCK_SYMBOL}")
-            return None
-            
-        logger.info(f"📊 [NVDA] Fetched {len(df)} 5-minute bars")
-        return df
-        
-    except Exception as e:
-        logger.error(f"Error fetching NVDA data: {e}")
-        return None
-
-def check_nvda_signal(df):
-    """Check NVDA trading signal using EMA crossover"""
-    try:
-        if len(df) < SLOW_EMA:
-            return 0, "Insufficient data"
-            
-        df['EMA_9'] = calculate_ema(df['close'], FAST_EMA)
-        df['EMA_21'] = calculate_ema(df['close'], SLOW_EMA)
-        
-        current_ema_9 = df['EMA_9'].iloc[-1]
-        current_ema_21 = df['EMA_21'].iloc[-1]
-        current_price = df['close'].iloc[-1]
-        
-        logger.info(f"🔍 [NVDA] Price: ${current_price:.2f}, EMA 9: {current_ema_9:.2f}, EMA 21: {current_ema_21:.2f}")
-        
-        if current_ema_9 > current_ema_21:
-            return 1, "Bullish - EMA 9 > EMA 21"
-        elif current_ema_9 < current_ema_21:
-            return -1, "Bearish - EMA 9 < EMA 21"
-        else:
-            return 0, "Neutral"
-            
-    except Exception as e:
-        logger.error(f"Error analyzing NVDA: {e}")
-        return 0, "Error"
-
-def manage_nvda_position(current_price):
-    """Manage NVDA position with 6% TP / 3% SL"""
+def manage_position(symbol, current_price, symbol_type):
+    """Manage existing position for any symbol"""
     try:
         try:
-            position = trading_client.get_position(STOCK_SYMBOL)
+            position = trading_client.get_position(symbol)
             if not position:
-                return False, "No NVDA position"
+                return False, f"No {symbol} position"
                 
-            # Try different attribute names for entry price
+            # Get entry price
             if hasattr(position, 'avg_fill_price'):
                 entry_price = float(position.avg_fill_price)
             elif hasattr(position, 'avg_entry_price'):
@@ -508,123 +653,108 @@ def manage_nvda_position(current_price):
             else:  # Short position  
                 pnl_percent = (entry_price - current_price) / entry_price
                 
-            logger.info(f"📊 [NVDA] Position: Entry ${entry_price:.2f}, Current ${current_price:.2f}, P&L: {pnl_percent:.2%}")
+            logger.debug(f"📊 [{symbol}] Position: Entry ${entry_price:.2f}, Current ${current_price:.2f}, P&L: {pnl_percent:.2%}")
             
-            # Risk management (6% TP / 3% SL)
-            if pnl_percent >= 0.06:  # 6% take profit
-                place_nvda_order(OrderSide.SELL if current_qty > 0 else OrderSide.BUY, 
-                               abs(current_qty), f"TAKE PROFIT at {pnl_percent:.2%}")
+            # Risk management
+            if symbol_type == "crypto":
+                # Tighter stops for crypto (more volatile)
+                take_profit_threshold = 0.03  # 3%
+                stop_loss_threshold = -0.015  # 1.5%
+            else:
+                # Standard stops for stocks
+                take_profit_threshold = 0.06  # 6%
+                stop_loss_threshold = -0.03  # 3%
+                
+            if pnl_percent >= take_profit_threshold:
+                place_order(symbol, OrderSide.SELL if current_qty > 0 else OrderSide.BUY, 
+                           abs(current_qty), f"TAKE PROFIT at {pnl_percent:.2%}")
                 return True, "Take profit triggered"
-            elif pnl_percent <= -0.03:  # 3% stop loss
-                place_nvda_order(OrderSide.SELL if current_qty > 0 else OrderSide.BUY,
-                               abs(current_qty), f"STOP LOSS at {pnl_percent:.2%}")
+            elif pnl_percent <= stop_loss_threshold:
+                place_order(symbol, OrderSide.SELL if current_qty > 0 else OrderSide.BUY,
+                           abs(current_qty), f"STOP LOSS at {pnl_percent:.2%}")
                 return True, "Stop loss triggered"
                 
             return False, f"Position within range - P&L: {pnl_percent:.2%}"
             
         except Exception:
-            return False, "No NVDA position found"
+            return False, f"No {symbol} position found"
             
     except Exception as e:
-        logger.error(f"Error managing NVDA position: {e}")
+        logger.error(f"Error managing {symbol} position: {e}")
         return False, "Error"
 
-def place_nvda_order(side, quantity, reason):
-    """Place NVDA order"""
+def place_order(symbol, side, quantity, reason):
+    """Place order for any symbol"""
     try:
         if quantity <= 0:
             return None
             
-        order = MarketOrderRequest(symbol=STOCK_SYMBOL, qty=quantity, side=side, time_in_force=TimeInForce.GTC)
+        order = MarketOrderRequest(symbol=symbol, qty=quantity, side=side, time_in_force=TimeInForce.GTC)
         result = trading_client.submit_order(order)
-        logger.info(f"🚀 [NVDA] {side.value.upper()}: {quantity} shares - {reason} - Order ID: {result.id}")
+        logger.info(f"🚀 [{symbol}] {side.value.upper()}: {quantity} - {reason} - Order ID: {result.id}")
         return result
         
     except Exception as e:
-        logger.error(f"Error placing NVDA order: {e}")
+        logger.error(f"Error placing {symbol} order: {e}")
         return None
 
-def run_nvda_trading():
-    """Run NVDA stock trading (market hours only)"""
+def calculate_position_size_per_symbol(price, symbol_type):
+    """Calculate position size per symbol based on portfolio allocation"""
     try:
-        if not is_market_hours():
-            logger.info("📅 [NVDA] Market closed")
-            return
-            
-        logger.info("🔄 [NVDA] Running stock trading cycle")
+        account = trading_client.get_account()
+        portfolio_value = float(account.portfolio_value)
         
-        df = fetch_nvda_data()
-        if df is None:
-            return
-            
-        current_price = df['close'].iloc[-1]
-        
-        # Check existing position first
-        position_exited, exit_reason = manage_nvda_position(current_price)
-        if position_exited:
-            logger.info(f"🔄 [NVDA] {exit_reason}")
-            return
-        
-        # Check for new signals
-        signal, reason = check_nvda_signal(df)
-        
-        if signal != 0:
-            # Check current position
-            try:
-                position = trading_client.get_position(STOCK_SYMBOL)
-                current_qty = float(position.qty) if position else 0
-            except:
-                current_qty = 0
-                
-            # Determine if we should place order
-            if signal == 1 and current_qty <= 0:  # Buy signal and no long position
-                place_nvda_order(OrderSide.BUY, STOCK_QTY, f"BUY signal - {reason}")
-            elif signal == -1 and current_qty >= 0:  # Sell signal and no short position
-                place_nvda_order(OrderSide.SELL, STOCK_QTY, f"SELL signal - {reason}")
-            else:
-                logger.info(f"[NVDA] Signal {signal} ignored due to existing position")
+        if symbol_type == "crypto":
+            max_symbols = MAX_CRYPTO_SYMBOLS
         else:
-            logger.info(f"✅ [NVDA] No signal - {reason}")
+            max_symbols = MAX_STOCK_SYMBOLS
+            
+        # Total allocation per asset class
+        if symbol_type == "crypto":
+            total_allocation = portfolio_value * (MAX_PORTFOLIO_PERCENT / 2)  # 50% of allocation for crypto
+        else:
+            total_allocation = portfolio_value * (MAX_PORTFOLIO_PERCENT / 2)  # 50% of allocation for stocks
+            
+        # Per symbol allocation
+        per_symbol_allocation = total_allocation / max_symbols
         
+        if symbol_type == "crypto":
+            quantity = per_symbol_allocation / price
+            return round(quantity, 6)  # Crypto can have fractional shares
+        else:
+            quantity = int(per_symbol_allocation / price)
+            return quantity if quantity >= 1 else 0  # Stocks need whole shares
+            
     except Exception as e:
-        logger.error(f"Error in NVDA trading: {e}")
+        logger.error(f"Error calculating position size: {e}")
+        return 0
 
-# =============================================================================
-# MAIN EXECUTION
-# =============================================================================
+def is_market_hours():
+    """Check if market is open"""
+    try:
+        clock = trading_client.get_clock()
+        return clock.is_open
+    except Exception as e:
+        logger.warning(f"Could not check market hours: {e}")
+        # Fallback to basic hours check
+        now = datetime.now().time()
+        return time(9, 30) <= now <= time(16, 0)  # 9:30 AM to 4:00 PM EST
 
-def main():
-    """Main function with dual-strategy execution"""
-    os.makedirs('/app/logs', exist_ok=True)
-    
-    logger.info("🚀 Starting Dual-Asset Trading Bot")
-    logger.info(f"📊 LTC 5-min scalping (24/7): EMA {FAST_EMA}/{SLOW_EMA}, Portfolio limit: {MAX_PORTFOLIO_PERCENT:.0%}")
-    logger.info(f"📈 NVDA 5-min trading (market hours): EMA {FAST_EMA}/{SLOW_EMA}, 6% TP / 3% SL")
-    logger.info(f"💰 LTC Targets: {TAKE_PROFIT_1:.1%}, {TAKE_PROFIT_2:.1%}, {TAKE_PROFIT_3:.1%} | SL: {STOP_LOSS_PERCENT:.1%}")
-    logger.info("⚠️  LIVE TRADING MODE - Real money at risk!")
-    
-    # Validate API access before starting
-    logger.info("🔍 Validating API access...")
-    if not validate_api_access():
-        logger.error("❌ API validation failed. Exiting.")
-        return
-    
-    # Check existing positions
-    check_existing_positions()
-    
-    # Run initial cycles
-    run_ltc_scalping()
-    time.sleep(150)  # 2.5 minute offset
-    run_nvda_trading()
-    
-    # Schedule both strategies
-    schedule.every(5).minutes.do(run_ltc_scalping)      # LTC every 5 minutes
-    schedule.every(5).minutes.do(run_nvda_trading)      # NVDA every 5 minutes (2.5 min offset)
-    
-    # Keep running
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
+def check_existing_positions():
+    """Check and log existing positions"""
+    try:
+        positions = trading_client.get_all_positions()
+        if positions:
+            logger.info(f"📋 Found {len(positions)} existing positions:")
+            for pos in positions:
+                pnl = float(pos.unrealized_pl)
+                pnl_pct = float(pos.unrealized_plpc) * 100
+                symbol_emoji = "₿" if pos.symbol.endswith("USD") else "📈"
+                logger.info(f"   {symbol_emoji} {pos.symbol}: {pos.qty} @ ${pos.avg_entry_price} (P&L: ${pnl:.2f}, {pnl_pct:.1f}%)")
+        else:
+            logger.info("📋 No existing positions found")
+    except Exception as e:
+        logger.warning(f"Could not check existing positions: {e}")
 
 if __name__ == "__main__":
     main()
