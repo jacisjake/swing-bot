@@ -41,8 +41,8 @@ services:
     container_name: alpaca-swing-bot
     restart: unless-stopped
     environment:
-      - ALPACA_LIVE_API_KEY=AKRG978ZNISA817UNE1C
-      - ALPACA_LIVE_API_SECRET=1mCvTHCR95ZJAcmvElQbGUf1umowwbm5dnEoyfB0
+      - ALPACA_LIVE_API_KEY=your_live_api_key_here
+      - ALPACA_LIVE_API_SECRET=your_live_secret_key_here
       - TRADING_SYMBOL=NVDA
       - TRADING_QUANTITY=1
     volumes:

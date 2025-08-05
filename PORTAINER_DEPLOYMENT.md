@@ -11,8 +11,8 @@ The bot is failing because API keys are not properly configured. You have two op
 3. Add these variables:
 
 ```
-ALPACA_LIVE_API_KEY=AKRG978ZNISA817UNE1C
-ALPACA_LIVE_API_SECRET=1mCvTHCR95ZJAcmvElQbGUf1umowwbm5dnEoyfB0
+ALPACA_LIVE_API_KEY=your_live_api_key_here
+ALPACA_LIVE_API_SECRET=your_live_secret_key_here
 ```
 
 ### Option 2: Direct Replacement in docker-compose.yml
@@ -21,8 +21,8 @@ Replace the placeholder values in docker-compose.yml:
 
 ```yaml
 environment:
-  - ALPACA_LIVE_API_KEY=AKRG978ZNISA817UNE1C
-  - ALPACA_LIVE_API_SECRET=1mCvTHCR95ZJAcmvElQbGUf1umowwbm5dnEoyfB0
+  - ALPACA_LIVE_API_KEY=your_live_api_key_here
+  - ALPACA_LIVE_API_SECRET=your_live_secret_key_here
 ```
 
 ## Current Error Diagnosis
