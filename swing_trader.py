@@ -160,6 +160,51 @@ def validate_api_access():
         return False
     return True
 
+def check_existing_positions():
+    """Check for existing positions on startup"""
+    try:
+        logger.info("📋 Checking existing positions...")
+        
+        # Get all positions
+        positions = trading_client.get_all_positions()
+        
+        if not positions:
+            logger.info("📭 No existing positions found")
+            return
+            
+        logger.info(f"📊 Found {len(positions)} existing position(s):")
+        
+        total_position_value = 0
+        for position in positions:
+            symbol = position.symbol
+            qty = float(position.qty)
+            side = "LONG" if qty > 0 else "SHORT"
+            market_value = float(position.market_value)
+            unrealized_pl = float(position.unrealized_pl)
+            unrealized_plpc = float(position.unrealized_plpc) * 100
+            avg_entry_price = float(position.avg_fill_price)
+            
+            total_position_value += abs(market_value)
+            
+            logger.info(f"  📈 {symbol}: {side} {abs(qty)} shares @ ${avg_entry_price:.2f}")
+            logger.info(f"      💰 Market Value: ${market_value:.2f}")
+            logger.info(f"      📊 P&L: ${unrealized_pl:.2f} ({unrealized_plpc:+.2f}%)")
+            
+            # Check if it's one of our tracked symbols
+            if symbol == STOCK_SYMBOL:
+                logger.info(f"      🎯 [NVDA] Tracked position - will manage with 6% TP / 3% SL")
+            elif symbol == CRYPTO_SYMBOL:
+                logger.info(f"      🎯 [LTC] Tracked position - NOTE: Manual position, not in LTC scalping tracker")
+                
+        # Portfolio allocation info
+        portfolio_value = get_portfolio_value()
+        allocation_percent = (total_position_value / portfolio_value) * 100
+        logger.info(f"💼 Total Position Value: ${total_position_value:.2f} ({allocation_percent:.1f}% of portfolio)")
+        logger.info(f"💼 Available for new positions: ${portfolio_value - total_position_value:.2f}")
+        
+    except Exception as e:
+        logger.error(f"Error checking existing positions: {e}")
+
 # =============================================================================
 # LTC SCALPING STRATEGY (24/7)
 # =============================================================================
@@ -536,6 +581,9 @@ def main():
     if not validate_api_access():
         logger.error("❌ API validation failed. Exiting.")
         return
+    
+    # Check existing positions
+    check_existing_positions()
     
     # Run initial cycles
     run_ltc_scalping()
