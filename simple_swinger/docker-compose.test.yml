@@ -1,0 +1,29 @@
+version: "3.8"
+services:
+  alpaca-bot-test:
+    build: .
+    container_name: alpaca-swing-bot-test
+    restart: "no"  # Don't auto-restart during testing
+    environment:
+      # Live trading with conservative settings for limited funds
+      - ALPACA_LIVE_API_KEY=${ALPACA_LIVE_API_KEY}
+      - ALPACA_LIVE_API_SECRET=${ALPACA_LIVE_API_SECRET}
+      # Trading Symbols
+      - STOCK_SYMBOL=NVDA
+      - CRYPTO_SYMBOL=LTC/USD
+      # Very conservative position sizes for limited fund account
+      - STOCK_QUANTITY=1
+      # LTC Scalping Strategy Settings (extra conservative for testing)
+      - MAX_PORTFOLIO_PERCENT=0.02  # Only 2% per asset for testing
+      - STOP_LOSS_PERCENT=0.005     # 0.5% stop loss
+      - TAKE_PROFIT_1=0.005         # 0.5% first target
+      - TAKE_PROFIT_2=0.010         # 1.0% second target
+      - TAKE_PROFIT_3=0.015         # 1.5% third target
+    volumes:
+      - ./logs:/app/logs
+      - /etc/localtime:/etc/localtime:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

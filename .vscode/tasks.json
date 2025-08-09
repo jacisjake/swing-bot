@@ -1,0 +1,17 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"args": [
+				"-c",
+				"echo 'Simple Swinger - Alpaca Trading Bot Setup Complete!' && echo '' && echo 'Project Structure:' && tree /f simple_swinger 2>nul || dir simple_swinger /s"
+			],
+			"command": "cmd",
+			"group": "build",
+			"isBackground": false,
+			"label": "Initialize Simple Swinger Project",
+			"problemMatcher": [],
+			"type": "shell"
+		}
+	]
+}
