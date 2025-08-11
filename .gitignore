@@ -15,6 +15,7 @@ node_modules/
 
 # Claude Code
 .claude/settings.local.json
+CLAUDE.md
 
 # OS files
 .DS_Store
