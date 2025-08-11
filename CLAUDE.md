@@ -10,10 +10,20 @@ This is a **screener-based multi-asset trading bot** for Alpaca Markets that tra
 
 ## Commands
 
+### Prerequisites
+```bash
+# Install Python dependencies (for local development)
+cd simple_swinger
+pip install -r requirements.txt
+
+# Environment setup - copy and configure
+cp .env.example .env  # Edit with your Alpaca API keys
+```
+
 ### Docker Deployment (Production)
 ```bash
 # CRITICAL: Always run from the correct directory
-cd "d:\projects\Aplaca Projects\simple_swinger"
+cd "D:\projects\Aplaca Projects\simple_swinger"
 
 # Stop existing container before rebuilding (IMPORTANT!)
 docker-compose down
@@ -36,6 +46,10 @@ python check_positions.py
 
 # Run bot locally (for testing - BE CAREFUL, this trades live!)
 python swing_trader.py
+
+# Test with paper trading (modify swing_trader.py: paper=True in TradingClient)
+# Look for: trading_client = TradingClient(API_KEY, SECRET_KEY, paper=False)
+# Change to: trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 ```
 
 ### Container Management
@@ -47,26 +61,64 @@ docker-compose up
 # Check container status
 docker ps
 
-# Access container shell
+# Access container shell for debugging
 docker exec -it alpaca-swing-bot /bin/bash
+
+# View container logs in real-time
+docker logs alpaca-swing-bot -f --tail=100
 ```
 
 ## Architecture
 
 ### Core Trading System (`swing_trader.py`)
-The monolithic trading engine (751 lines) implements:
-- **Dynamic Symbol Selection**: `screen_top_stock_movers()` and `screen_top_crypto_movers()` select symbols based on market performance
-- **Multi-Symbol Execution**: `run_multi_symbol_trading()` orchestrates trading across all selected symbols
-- **Generic Trading Functions**: `trade_stock_symbol()` and `trade_crypto_symbol()` handle any symbol (replaced old LTC/NVDA-specific functions)
-- **Position Management**: `manage_position()` implements stop-loss and take-profit logic with different thresholds for stocks (6%/3%) vs crypto (3%/1.5%)
-- **Entry Signal Detection**: `check_entry_signal()` uses EMA 9/21 crossover with green candle confirmation
+The monolithic trading engine (~1050+ lines) contains all trading logic in a single file:
+
+**Key Classes:**
+- `PositionTracker`: Tracks individual position state (entry price, quantity, order ID)
+
+**Core Functions (in execution order):**
+1. **Initialization & Validation**:
+   - `validate_api_access()`: Tests API connectivity on startup
+   - `get_portfolio_value()`: Gets current account balance
+   
+2. **Market Screening** (Hourly):
+   - `screen_top_stock_movers()`: Uses Alpaca's MarketMoversRequest for stock selection
+   - `screen_top_crypto_movers()`: Custom crypto screening based on 24h performance
+   - `update_symbol_lists()`: Updates global symbol lists with screener results
+   
+3. **Trading Orchestration** (5-minute cycles):
+   - `run_multi_symbol_trading()`: Main trading loop coordinator
+   - `trade_stock_symbol()` / `trade_crypto_symbol()`: Symbol-specific trading logic
+   
+4. **Technical Analysis**:
+   - `calculate_ema()`, `calculate_macd()`, `calculate_rsi()`: Technical indicators
+   - `check_entry_signal()`: 4 different entry strategies using MACD/RSI/EMA combinations
+   - `check_exit_signal()`: Technical exit signals (RSI overbought, MACD bearish crossover, momentum loss)
+   
+5. **Position Management**:
+   - `manage_position_with_indicators()`: Enhanced position management with technical exits
+   - `manage_position()`: Traditional stop-loss/take-profit backup system
+   - `calculate_position_size_per_symbol()`: Position sizing with cash/portfolio limits
+   
+6. **Order Execution**:
+   - `place_order()`: Market order placement with error handling
+   - `check_existing_positions()`: Position status verification
 
 ### Trading Strategy Flow
 1. **Symbol Screening** (hourly): Updates `active_stock_symbols` and `active_crypto_symbols` lists
-2. **Market Analysis** (5-min): Checks entry signals for all active symbols
-3. **Position Entry**: Places market orders when EMA crossover + bullish candles detected
-4. **Risk Management**: Monitors positions for stop-loss/take-profit thresholds
-5. **Portfolio Allocation**: Limits total exposure to 10% (6% stocks, 4% crypto) with equal weighting
+2. **Market Analysis** (5-min): Checks multiple entry signals for all active symbols using:
+   - **Strategy 1**: MACD crossover + RSI (30-70) + Green candle
+   - **Strategy 2**: EMA crossover + MACD bullish + Green candle
+   - **Strategy 3**: RSI oversold bounce (from <30 to >35) + MACD momentum
+   - **Strategy 4**: Strong momentum (all indicators bullish + RSI increasing)
+3. **Position Entry**: Places market orders when any entry strategy triggers
+4. **Technical Exit Monitoring**: Continuously checks for:
+   - RSI overbought (>75) for profit taking
+   - MACD bearish crossover for trend reversal
+   - Momentum loss (declining MACD histogram)
+   - EMA death cross (bearish signal)
+5. **Risk Management**: Traditional stop-loss/take-profit as backup to technical exits
+6. **Portfolio Allocation**: Limits total exposure to 10% (6% stocks, 4% crypto) with equal weighting
 
 ### Key Configuration Variables
 Environment variables control behavior (set in `.env` or Docker environment):
@@ -111,12 +163,34 @@ Environment variables control behavior (set in `.env` or Docker environment):
 - **Container Using Old Code**: Rebuild with `--no-cache` flag
 - **API Keys Not Loading**: Check Portainer environment variables or `.env` file mounting
 
+## Development & Testing Tools
+
+### Position Monitoring (`check_positions.py`)
+- **Purpose**: Standalone script to check current positions without running the full bot
+- **Usage**: `python check_positions.py` (requires `.env` file)
+- **Features**: Shows portfolio value, position details, P&L, and exit threshold analysis
+- **Safety**: Read-only - no trading operations performed
+
+### Configuration Files
+- **`.env`**: Live API keys and trading parameters (never commit!)
+- **`.env.example`**: Template with parameter descriptions
+- **`.env.test`**: Test environment configuration
+- **`docker-compose.yml`**: Production container configuration
+- **`requirements.txt`**: Python dependencies (pandas, alpaca-py, schedule, etc.)
+
+### Logging System
+- **Container**: `/app/logs/trading.log` (mounted to `./logs/trading.log` on host)
+- **Format**: Timestamped with INFO/ERROR levels
+- **Key Messages**: Look for "✅ Account access validated", "📊 Selected X stocks/cryptos", "🚀 [SYMBOL] BUY/SELL"
+
 ## Known Issues & Gotchas
 
-1. **No Duplicate Order Prevention**: Could place multiple orders for same signal
-2. **No Stale Data Detection**: Could trade on old data if API delays occur
-3. **Abrupt Error Handling**: Bot stops on many errors instead of recovering
-4. **Monolithic Architecture**: All logic in single 751-line file makes testing difficult
+1. **No Duplicate Order Prevention**: Could place multiple orders for same signal during rapid cycles
+2. **No Stale Data Detection**: Could trade on old data if Alpaca API experiences delays
+3. **Abrupt Error Handling**: Bot stops completely on many errors instead of graceful recovery
+4. **Monolithic Architecture**: All logic in single 1050+ line file makes testing and debugging difficult
+5. **Memory Leaks**: Long-running container may accumulate data in global variables over time
+6. **API Rate Limits**: No built-in rate limiting for Alpaca API calls
 
 ## System Evolution History
 
@@ -135,17 +209,28 @@ Environment variables control behavior (set in `.env` or Docker environment):
 ## Testing & Safety
 
 ### Before Making Changes
-1. Review this file for system context
-2. Check `check_positions.py` to understand current positions
-3. Test with paper trading if possible (change `paper=False` to `paper=True` in trading client)
-4. Ensure no hardcoded API keys in code
+1. **Review System Context**: Read this file completely for current system understanding
+2. **Check Current State**: Run `python check_positions.py` to see active positions
+3. **Enable Paper Trading**: In `swing_trader.py:34`, change `paper=False` to `paper=True` in TradingClient
+4. **Verify Environment**: Ensure `.env` file exists with valid API keys (never commit!)
+5. **Test Locally First**: Run `python swing_trader.py` locally before containerizing
+
+### Code Modification Guidelines
+- **API Keys**: Always use environment variables, never hardcode
+- **Error Handling**: Add try/catch blocks for all API calls
+- **Logging**: Add meaningful log messages for debugging
+- **Position Limits**: Respect MAX_POSITION_PERCENT and MAX_CASH_PER_TRADE limits
+- **Market Hours**: Ensure stock trades only happen during market hours (9:30 AM - 4:00 PM ET)
 
 ### Deployment Checklist
-1. Stop existing container: `docker-compose down`
-2. Rebuild without cache: `docker-compose build --no-cache`
-3. Check logs after deployment: `docker logs alpaca-swing-bot -f`
-4. Verify API access in logs: Look for "✅ Account access validated"
-5. Monitor first trading cycle for errors
+1. **Stop Container**: `docker-compose down` (from simple_swinger directory)
+2. **Rebuild Clean**: `docker-compose build --no-cache` 
+3. **Deploy**: `docker-compose up -d --build`
+4. **Monitor Startup**: `docker logs alpaca-swing-bot -f --tail=50`
+5. **Verify API Access**: Look for "✅ Account access validated" in logs
+6. **Check Symbol Selection**: Look for "📊 Selected X stocks/cryptos" messages
+7. **Monitor First Cycle**: Watch for entry/exit signals and order execution
+8. **Verify Positions**: Run `check_positions.py` to confirm expected state
 
 ## Portfolio Status & Monitoring
 

@@ -116,6 +116,24 @@ def calculate_ema(data, period):
     """Calculate Exponential Moving Average"""
     return data.ewm(span=period, adjust=False).mean()
 
+def calculate_macd(prices, fast=12, slow=26, signal=9):
+    """Calculate MACD, Signal line, and Histogram"""
+    ema_fast = prices.ewm(span=fast, adjust=False).mean()
+    ema_slow = prices.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+def calculate_rsi(prices, period=14):
+    """Calculate Relative Strength Index"""
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def validate_api_access():
     """Validate API access for both stock and crypto data"""
     try:
@@ -421,17 +439,17 @@ def calculate_position_size_per_symbol(current_price, symbol_type="stock"):
         # SAFETY CHECK: Never exceed available cash (no borrowing)
         max_investment = min(max_investment, available_cash)
         
-        # Ensure we have enough for minimum trade
-        min_trade_value = current_price if symbol_type == "stock" else current_price * 0.01
+        # Ensure we have enough for minimum trade (Alpaca minimum is $1 for fractional shares)
+        min_trade_value = 1.0 if symbol_type == "stock" else current_price * 0.01  # $1 min for stocks, crypto varies
         if max_investment < min_trade_value:
             logger.warning(f"⚠️ Insufficient funds: ${max_investment:.2f} < ${min_trade_value:.2f} minimum")
             return 0
         
         # Calculate position size
         if symbol_type == "stock":
-            # For stocks, use whole shares
-            max_shares = int(max_investment / current_price)
-            position_size = max_shares if max_shares >= 1 else 0
+            # For stocks, use fractional shares (Alpaca supports fractional trading)
+            max_shares = max_investment / current_price
+            position_size = round(max_shares, 6) if max_shares >= 0.000001 else 0  # 6 decimal precision
         else:
             # For crypto, allow fractional shares
             max_shares = max_investment / current_price
@@ -442,7 +460,7 @@ def calculate_position_size_per_symbol(current_price, symbol_type="stock"):
         if total_cost > available_cash:
             logger.warning(f"⚠️ Position cost ${total_cost:.2f} exceeds cash ${available_cash:.2f} - reducing")
             if symbol_type == "stock":
-                position_size = int(available_cash / current_price)
+                position_size = round(available_cash / current_price, 6)  # Fractional shares for stocks
             else:
                 position_size = round(available_cash / current_price, 4)
         
@@ -555,8 +573,8 @@ def trade_crypto_symbol(symbol):
         else:
             logger.debug(f"⏳ [{symbol}] No entry signal - {reason}")
             
-        # Manage existing position
-        manage_position(symbol, current_price, "crypto")
+        # Manage existing position with technical indicators
+        manage_position_with_indicators(symbol, current_price, "crypto", df)
         
     except Exception as e:
         logger.error(f"Error trading crypto {symbol}: {e}")
@@ -584,8 +602,8 @@ def trade_stock_symbol(symbol):
         else:
             logger.debug(f"⏳ [{symbol}] No entry signal - {reason}")
             
-        # Manage existing position
-        manage_position(symbol, current_price, "stock")
+        # Manage existing position with technical indicators
+        manage_position_with_indicators(symbol, current_price, "stock", df)
         
     except Exception as e:
         logger.error(f"Error trading stock {symbol}: {e}")
@@ -629,38 +647,197 @@ def fetch_symbol_data(symbol, symbol_type):
         return None
 
 def check_entry_signal(df, symbol):
-    """Check entry signal for any symbol using EMA crossover"""
+    """Check entry signal using MACD, RSI, and EMA indicators"""
     try:
-        if len(df) < SLOW_EMA + 2:
+        if len(df) < 30:  # Need more data for MACD
             return False, "Insufficient data"
             
+        # Calculate indicators
         df['EMA_9'] = calculate_ema(df['close'], FAST_EMA)
         df['EMA_21'] = calculate_ema(df['close'], SLOW_EMA)
         
+        macd, signal, histogram = calculate_macd(df['close'])
+        df['MACD'] = macd
+        df['MACD_Signal'] = signal
+        df['MACD_Histogram'] = histogram
+        
+        df['RSI'] = calculate_rsi(df['close'])
+        
+        # Current values
+        current_price = df['close'].iloc[-1]
+        current_ema_9 = df['EMA_9'].iloc[-1]
+        current_ema_21 = df['EMA_21'].iloc[-1]
+        current_macd = df['MACD'].iloc[-1]
+        current_signal = df['MACD_Signal'].iloc[-1]
+        current_histogram = df['MACD_Histogram'].iloc[-1]
+        current_rsi = df['RSI'].iloc[-1]
+        
+        # Previous values for crossover detection
+        previous_ema_9 = df['EMA_9'].iloc[-2]
+        previous_ema_21 = df['EMA_21'].iloc[-2]
+        previous_macd = df['MACD'].iloc[-2]
+        previous_signal = df['MACD_Signal'].iloc[-2]
+        previous_histogram = df['MACD_Histogram'].iloc[-2]
+        
+        # Candle analysis
+        current_candle = df.iloc[-1]
+        current_green = current_candle['close'] > current_candle['open']
+        
+        # === ENTRY CONDITIONS (Multiple confirmation) ===
+        # 1. EMA conditions
+        ema_bullish = current_ema_9 > current_ema_21
+        ema_crossover = (previous_ema_9 <= previous_ema_21) and ema_bullish
+        
+        # 2. MACD conditions
+        macd_bullish = current_macd > current_signal
+        macd_crossover = (previous_macd <= previous_signal) and macd_bullish
+        macd_momentum = current_histogram > previous_histogram  # Increasing momentum
+        
+        # 3. RSI conditions
+        rsi_oversold_bounce = 30 < current_rsi < 70  # Not overbought
+        rsi_bullish = current_rsi > df['RSI'].iloc[-2]  # RSI increasing
+        
+        # Log all indicators
+        logger.debug(f"🔍 [{symbol}] Price: ${current_price:.2f}")
+        logger.debug(f"📊 [{symbol}] EMA: 9={current_ema_9:.2f}, 21={current_ema_21:.2f}, Bullish={ema_bullish}")
+        logger.debug(f"📈 [{symbol}] MACD: {current_macd:.4f}, Signal: {current_signal:.4f}, Hist: {current_histogram:.4f}")
+        logger.debug(f"📉 [{symbol}] RSI: {current_rsi:.1f}, Increasing={rsi_bullish}")
+        
+        # === ENTRY STRATEGIES (Less restrictive, multiple paths) ===
+        
+        # Strategy 1: Strong MACD crossover with RSI support
+        if macd_crossover and rsi_oversold_bounce and current_green:
+            return True, f"MACD crossover + RSI {current_rsi:.1f} + Green candle"
+            
+        # Strategy 2: EMA crossover with MACD confirmation
+        if ema_crossover and macd_bullish and current_green:
+            return True, f"EMA crossover + MACD bullish + Green candle"
+            
+        # Strategy 3: Oversold bounce (RSI recovery)
+        if current_rsi > 35 and df['RSI'].iloc[-3] < 30 and macd_momentum and current_green:
+            return True, f"RSI oversold bounce {current_rsi:.1f} + MACD momentum"
+            
+        # Strategy 4: Strong momentum play
+        if ema_bullish and macd_bullish and macd_momentum and rsi_bullish and current_green:
+            return True, f"Strong momentum: All indicators bullish"
+        
+        # No signal reasons
+        reasons = []
+        if not ema_bullish:
+            reasons.append("EMA bearish")
+        if not macd_bullish:
+            reasons.append("MACD bearish")
+        if current_rsi > 70:
+            reasons.append(f"RSI overbought {current_rsi:.1f}")
+        if not current_green:
+            reasons.append("Red candle")
+            
+        return False, f"No signal: {', '.join(reasons) if reasons else 'Conditions not met'}"
+            
+    except Exception as e:
+        logger.error(f"Error checking entry signal for {symbol}: {e}")
+        return False, "Error in analysis"
+
+def check_exit_signal(df, symbol, pnl_percent):
+    """Check exit signal using MACD, RSI, and EMA indicators"""
+    try:
+        if len(df) < 30:
+            return False, "Insufficient data for exit analysis"
+            
+        # Calculate indicators
+        df['EMA_9'] = calculate_ema(df['close'], FAST_EMA)
+        df['EMA_21'] = calculate_ema(df['close'], SLOW_EMA)
+        
+        macd, signal, histogram = calculate_macd(df['close'])
+        df['MACD'] = macd
+        df['MACD_Signal'] = signal
+        df['MACD_Histogram'] = histogram
+        
+        df['RSI'] = calculate_rsi(df['close'])
+        
+        # Current values
+        current_price = df['close'].iloc[-1]
+        current_macd = df['MACD'].iloc[-1]
+        current_signal = df['MACD_Signal'].iloc[-1]
+        current_histogram = df['MACD_Histogram'].iloc[-1]
+        current_rsi = df['RSI'].iloc[-1]
+        
+        # Previous values
+        previous_macd = df['MACD'].iloc[-2]
+        previous_signal = df['MACD_Signal'].iloc[-2]
+        previous_histogram = df['MACD_Histogram'].iloc[-2]
+        
+        # === EXIT CONDITIONS ===
+        
+        # 1. RSI Overbought (take profits)
+        if current_rsi > 75 and pnl_percent > 0.01:  # RSI very overbought + in profit
+            return True, f"RSI overbought {current_rsi:.1f} - Take profit"
+            
+        # 2. MACD bearish crossover
+        macd_bearish_cross = (previous_macd >= previous_signal) and (current_macd < current_signal)
+        if macd_bearish_cross and pnl_percent > -0.01:  # MACD cross with small loss tolerance
+            return True, f"MACD bearish crossover - Exit signal"
+            
+        # 3. Momentum loss (histogram declining)
+        momentum_loss = (current_histogram < previous_histogram < df['MACD_Histogram'].iloc[-3])
+        if momentum_loss and current_rsi > 60 and pnl_percent > 0:
+            return True, f"Momentum declining - RSI {current_rsi:.1f}"
+            
+        # 4. EMA death cross (bearish)
         current_ema_9 = df['EMA_9'].iloc[-1]
         current_ema_21 = df['EMA_21'].iloc[-1]
         previous_ema_9 = df['EMA_9'].iloc[-2]
         previous_ema_21 = df['EMA_21'].iloc[-2]
         
-        current_candle = df.iloc[-1]
-        previous_candle = df.iloc[-2]
+        ema_death_cross = (previous_ema_9 >= previous_ema_21) and (current_ema_9 < current_ema_21)
+        if ema_death_cross:
+            return True, f"EMA death cross - Bearish signal"
+            
+        return False, "No exit signal"
         
-        # Entry conditions
-        ema_crossover = (previous_ema_9 <= previous_ema_21) and (current_ema_9 > current_ema_21)
-        previous_green = previous_candle['close'] > previous_candle['open']
-        current_green = current_candle['close'] > current_candle['open']
-        
-        logger.debug(f"🔍 [{symbol}] EMA 9: {current_ema_9:.4f}, EMA 21: {current_ema_21:.4f}")
-        logger.debug(f"🔍 [{symbol}] Crossover: {ema_crossover}, Prev Green: {previous_green}, Curr Green: {current_green}")
-        
-        if ema_crossover and previous_green and current_green:
-            return True, "EMA crossover with bullish candles"
-        else:
-            return False, "Entry conditions not satisfied"
+    except Exception as e:
+        logger.error(f"Error checking exit signal for {symbol}: {e}")
+        return False, "Error in exit analysis"
+
+def manage_position_with_indicators(symbol, current_price, symbol_type, df):
+    """Enhanced position management with technical indicators"""
+    try:
+        try:
+            position = trading_client.get_position(symbol)
+            if not position:
+                return False, f"No {symbol} position"
+                
+            # Get entry price and P&L
+            if hasattr(position, 'avg_fill_price'):
+                entry_price = float(position.avg_fill_price)
+            elif hasattr(position, 'avg_entry_price'):
+                entry_price = float(position.avg_entry_price)
+            elif hasattr(position, 'cost_basis'):
+                entry_price = float(position.cost_basis) / abs(float(position.qty))
+            else:
+                entry_price = abs(float(position.market_value)) / abs(float(position.qty))
+                
+            current_qty = float(position.qty)
+            pnl_percent = (current_price - entry_price) / entry_price if current_qty > 0 else 0
+            
+            # Check technical exit signals
+            should_exit, exit_reason = check_exit_signal(df, symbol, pnl_percent)
+            
+            if should_exit:
+                logger.info(f"📊 [{symbol}] Technical exit signal: {exit_reason}")
+                place_order(symbol, OrderSide.SELL, abs(current_qty), f"TECHNICAL EXIT - {exit_reason}")
+                return True, f"Technical exit: {exit_reason}"
+            
+            # Continue with existing stop-loss/take-profit logic
+            return manage_position(symbol, current_price, symbol_type)
+            
+        except Exception as e:
+            # No position exists
+            return False, f"No {symbol} position"
             
     except Exception as e:
-        logger.error(f"Error checking entry signal for {symbol}: {e}")
-        return False, "Error in analysis"
+        logger.error(f"Error in enhanced position management for {symbol}: {e}")
+        return False, "Error"
 
 def manage_position(symbol, current_price, symbol_type):
     """Manage existing position with trailing stop-loss support"""
