@@ -767,23 +767,11 @@ def check_exit_signal(df, symbol, pnl_percent):
         previous_signal = df['MACD_Signal'].iloc[-2]
         previous_histogram = df['MACD_Histogram'].iloc[-2]
         
-        # === EXIT CONDITIONS ===
+        # === EXIT CONDITIONS (Priority Order) ===
         
-        # 1. RSI Overbought (take profits)
-        if current_rsi > 75 and pnl_percent > 0.01:  # RSI very overbought + in profit
-            return True, f"RSI overbought {current_rsi:.1f} - Take profit"
-            
-        # 2. MACD bearish crossover
-        macd_bearish_cross = (previous_macd >= previous_signal) and (current_macd < current_signal)
-        if macd_bearish_cross and pnl_percent > -0.01:  # MACD cross with small loss tolerance
-            return True, f"MACD bearish crossover - Exit signal"
-            
-        # 3. Momentum loss (histogram declining)
-        momentum_loss = (current_histogram < previous_histogram < df['MACD_Histogram'].iloc[-3])
-        if momentum_loss and current_rsi > 60 and pnl_percent > 0:
-            return True, f"Momentum declining - RSI {current_rsi:.1f}"
-            
-        # 4. EMA death cross (bearish)
+        # PRIORITY 1: Trend Reversal Signals (exit immediately regardless of P&L)
+        
+        # 1a. EMA death cross (bearish trend reversal)
         current_ema_9 = df['EMA_9'].iloc[-1]
         current_ema_21 = df['EMA_21'].iloc[-1]
         previous_ema_9 = df['EMA_9'].iloc[-2]
@@ -791,7 +779,23 @@ def check_exit_signal(df, symbol, pnl_percent):
         
         ema_death_cross = (previous_ema_9 >= previous_ema_21) and (current_ema_9 < current_ema_21)
         if ema_death_cross:
-            return True, f"EMA death cross - Bearish signal"
+            return True, f"[P1] EMA death cross - Trend reversal"
+            
+        # 1b. MACD bearish crossover (momentum reversal - NO loss tolerance)
+        macd_bearish_cross = (previous_macd >= previous_signal) and (current_macd < current_signal)
+        if macd_bearish_cross:
+            return True, f"[P1] MACD bearish crossover - Trend reversal"
+            
+        # PRIORITY 2: Profit Protection Signals
+        
+        # 2a. RSI Overbought (take profits when extremely overbought)
+        if current_rsi > 75 and pnl_percent > 0.01:  # RSI very overbought + in profit
+            return True, f"[P2] RSI overbought {current_rsi:.1f} - Take profit"
+            
+        # 2b. Momentum loss (histogram declining for multiple periods)
+        momentum_loss = (current_histogram < previous_histogram < df['MACD_Histogram'].iloc[-3])
+        if momentum_loss and current_rsi > 60 and pnl_percent > 0:
+            return True, f"[P2] Momentum declining - RSI {current_rsi:.1f}"
             
         return False, "No exit signal"
         
@@ -800,7 +804,7 @@ def check_exit_signal(df, symbol, pnl_percent):
         return False, "Error in exit analysis"
 
 def manage_position_with_indicators(symbol, current_price, symbol_type, df):
-    """Enhanced position management with technical indicators"""
+    """Enhanced position management with clear priority hierarchy for exits"""
     try:
         try:
             position = trading_client.get_position(symbol)
@@ -820,15 +824,19 @@ def manage_position_with_indicators(symbol, current_price, symbol_type, df):
             current_qty = float(position.qty)
             pnl_percent = (current_price - entry_price) / entry_price if current_qty > 0 else 0
             
-            # Check technical exit signals
+            # Log current position status
+            logger.info(f"📊 [{symbol}] Checking exits - Price: ${current_price:.2f}, P&L: {pnl_percent:.2%}")
+            
+            # PRIORITY 1: Check technical exit signals (trend reversals)
             should_exit, exit_reason = check_exit_signal(df, symbol, pnl_percent)
             
             if should_exit:
-                logger.info(f"📊 [{symbol}] Technical exit signal: {exit_reason}")
-                place_order(symbol, OrderSide.SELL, abs(current_qty), f"TECHNICAL EXIT - {exit_reason}")
-                return True, f"Technical exit: {exit_reason}"
+                logger.info(f"🚨 [{symbol}] {exit_reason} at {pnl_percent:.2%} P&L")
+                place_order(symbol, OrderSide.SELL, abs(current_qty), exit_reason)
+                return True, exit_reason
             
-            # Continue with existing stop-loss/take-profit logic
+            # PRIORITY 2-4: Check stop-loss/take-profit/trailing stops
+            # These are handled in manage_position() function
             return manage_position(symbol, current_price, symbol_type)
             
         except Exception as e:
@@ -881,17 +889,17 @@ def manage_position(symbol, current_price, symbol_type):
             
             tracking = manage_position.trailing_data[position_id]
             
-            # Risk management parameters
+            # Risk management parameters (TIGHTENED for faster exits on trend reversal)
             if symbol_type == "crypto":
                 # Tighter stops for crypto (more volatile)
                 take_profit_threshold = 0.03  # 3%
-                initial_stop_loss = 0.015  # 1.5%
-                trailing_stop_distance = 0.01  # Trail by 1%
+                initial_stop_loss = 0.01  # 1% (tightened from 1.5%)
+                trailing_stop_distance = 0.0075  # Trail by 0.75% (tightened from 1%)
             else:
-                # Standard stops for stocks
+                # Standard stops for stocks  
                 take_profit_threshold = 0.06  # 6%
-                initial_stop_loss = 0.03  # 3%
-                trailing_stop_distance = 0.02  # Trail by 2%
+                initial_stop_loss = 0.02  # 2% (tightened from 3%)
+                trailing_stop_distance = 0.015  # Trail by 1.5% (tightened from 2%)
             
             # Update highest/lowest price
             if current_qty > 0:  # Long position
@@ -905,9 +913,10 @@ def manage_position(symbol, current_price, symbol_type):
                 initial_stop_price = entry_price * (1 - initial_stop_loss)
                 effective_stop_price = max(initial_stop_price, tracking['trailing_stop'] or 0)
                 
-                # Check if stop should trigger
+                # Check if stop should trigger (PRIORITY 3: Maximum Loss Protection)
                 if current_price <= effective_stop_price:
-                    stop_type = "TRAILING STOP" if effective_stop_price > initial_stop_price else "STOP LOSS"
+                    stop_type = "[P3] TRAILING STOP" if effective_stop_price > initial_stop_price else "[P3] STOP LOSS"
+                    logger.info(f"🛑 [{symbol}] {stop_type} triggered at ${current_price:.2f} (stop: ${effective_stop_price:.2f})")
                     place_order(symbol, OrderSide.SELL, abs(current_qty), 
                               f"{stop_type} at ${current_price:.2f} (stop: ${effective_stop_price:.2f})")
                     del manage_position.trailing_data[position_id]  # Clean up tracking
