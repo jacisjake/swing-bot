@@ -4,8 +4,30 @@ services:
     build: .
     container_name: alpaca-swing-bot
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      # CRITICAL: Set these in Portainer stack environment variables
+      - ALPACA_LIVE_API_KEY=${ALPACA_LIVE_API_KEY}
+      - ALPACA_LIVE_API_SECRET=${ALPACA_LIVE_API_SECRET}
+      
+      # Trading Configuration (can be overridden in Portainer)
+      - STOCK_SYMBOL=${STOCK_SYMBOL:-NVDA}
+      - CRYPTO_SYMBOL=${CRYPTO_SYMBOL:-LTC/USD}
+      - MAX_STOCK_SYMBOLS=${MAX_STOCK_SYMBOLS:-10}
+      - MAX_CRYPTO_SYMBOLS=${MAX_CRYPTO_SYMBOLS:-5}
+      - MAX_POSITION_PERCENT=${MAX_POSITION_PERCENT:-0.20}
+      - MAX_CASH_PER_TRADE=${MAX_CASH_PER_TRADE:-0.10}
+      - SCREENER_UPDATE_HOURS=${SCREENER_UPDATE_HOURS:-1}
+      
+      # Risk Management
+      - STOP_LOSS_PERCENT=${STOP_LOSS_PERCENT:-0.005}
+      - TAKE_PROFIT_1=${TAKE_PROFIT_1:-0.005}
+      - TAKE_PROFIT_2=${TAKE_PROFIT_2:-0.010}
+      - TAKE_PROFIT_3=${TAKE_PROFIT_3:-0.015}
+      
+      # Screener Criteria
+      - MIN_PRICE=${MIN_PRICE:-5.0}
+      - MAX_PRICE=${MAX_PRICE:-500.0}
+      - MIN_DAILY_VOLUME=${MIN_DAILY_VOLUME:-1000000}
     volumes:
       - ./logs:/app/logs
       - /etc/localtime:/etc/localtime:ro
