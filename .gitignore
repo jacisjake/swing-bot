@@ -1,32 +1,64 @@
 # .gitignore for Simple Swinger Bot
 
-# Environment files
+# Environment files (CRITICAL - Never commit API keys!)
 .env
 .env.local
 .env.production
 .env.test
 
-# Logs
+# Logs and temporary files
 logs/
 *.log
+trading.log
+*.tmp
 
-# Python cache
+# Python cache and bytecode
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+*.egg-info/
+dist/
+build/
 
 # Virtual environments
 venv/
 env/
+.venv/
 
-# IDE files
+# IDE and editor files
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
 
 # OS files
 .DS_Store
 Thumbs.db
+*.orig
 
-# Sensitive data
+# Docker volumes and data
+data/
+volumes/
+
+# Sensitive data and credentials
 api_keys.txt
 secrets.txt
+*.pem
+*.key
+credentials.json
+
+# Backup files
+*.bak
+*.backup
+
+# Test coverage reports
+htmlcov/
+.coverage
+.pytest_cache/
+
+# Local development files
+.env.development
+test_data/
+scratch/
