@@ -1,0 +1,20 @@
+[Unit]
+Description=Swing Trader Bot (Podman)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=30
+WorkingDirectory=/opt/swing-trader/deploy
+ExecStartPre=/usr/bin/podman-compose down
+ExecStart=/usr/bin/podman-compose up
+ExecStop=/usr/bin/podman-compose down
+TimeoutStopSec=60
+
+# Environment file with API keys
+EnvironmentFile=/opt/swing-trader/.env
+
+[Install]
+WantedBy=multi-user.target
