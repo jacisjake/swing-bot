@@ -61,8 +61,8 @@ class BotConfig(Settings):
         description="How often to sync with broker positions",
     )
     watchlist_refresh_interval_minutes: int = Field(
-        default=30,
-        ge=10,
+        default=10,
+        ge=5,
         le=120,
         description="How often to refresh watchlist from screeners (during market hours)",
     )
