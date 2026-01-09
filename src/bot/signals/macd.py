@@ -166,7 +166,7 @@ class MACDStrategy(SignalGenerator):
         Check if position should exit.
 
         Exit when:
-        - Red candle (close < open) AND MACD crosses below signal line
+        - Red candle (close < open) AND MACD line crosses below zero
 
         Args:
             symbol: Asset symbol
@@ -192,21 +192,19 @@ class MACDStrategy(SignalGenerator):
         )
 
         curr_macd = float(macd_line.iloc[-1])
-        curr_signal = float(signal_line.iloc[-1])
         prev_macd = float(macd_line.iloc[-2])
-        prev_signal = float(signal_line.iloc[-2])
 
         # Check for red candle
         current_close = float(close.iloc[-1])
         current_open = float(open_price.iloc[-1])
         is_red_candle = current_close < current_open
 
-        # Check for MACD cross below signal
-        macd_crossed_down = curr_macd < curr_signal and prev_macd >= prev_signal
+        # Check for MACD crossing below zero (into negative territory)
+        macd_crossed_negative = curr_macd < 0 and prev_macd >= 0
 
         if direction == SignalDirection.LONG:
-            if is_red_candle and macd_crossed_down:
-                return True, f"Red candle + MACD crossed down (MACD={curr_macd:.4f} < Signal={curr_signal:.4f})"
+            if is_red_candle and macd_crossed_negative:
+                return True, f"Red candle + MACD crossed negative (MACD={curr_macd:.4f})"
 
         return False, None
 

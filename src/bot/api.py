@@ -5,6 +5,7 @@ Simple web API for bot monitoring dashboard.
 from datetime import datetime
 from typing import Optional
 
+import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -172,6 +173,56 @@ async def get_signals() -> dict:
     }
 
 
+@app.get("/api/bars/{symbol}")
+async def get_bars(symbol: str, timeframe: str = "5Min", limit: int = 100) -> dict:
+    """Get OHLCV bars with MACD indicators for charting."""
+    if not _bot:
+        return {"error": "Bot not initialized"}
+
+    try:
+        from src.data.indicators import macd
+
+        # Fetch bars from Alpaca
+        bars = _bot.client.get_bars(symbol, timeframe=timeframe, limit=limit)
+
+        if bars is None or bars.empty:
+            return {"error": f"No data for {symbol}"}
+
+        # Calculate MACD
+        close = bars["close"]
+        macd_line, signal_line, histogram = macd(close, 8, 17, 9)
+
+        # Format for TradingView Lightweight Charts
+        candles = []
+        for idx, row in bars.iterrows():
+            candles.append({
+                "time": int(idx.timestamp()),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+            })
+
+        macd_data = []
+        for i, (idx, _) in enumerate(bars.iterrows()):
+            if not pd.isna(macd_line.iloc[i]):
+                macd_data.append({
+                    "time": int(idx.timestamp()),
+                    "macd": float(macd_line.iloc[i]),
+                    "signal": float(signal_line.iloc[i]),
+                    "histogram": float(histogram.iloc[i]),
+                })
+
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "candles": candles,
+            "macd": macd_data,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -179,6 +230,7 @@ DASHBOARD_HTML = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Swing Trader Dashboard</title>
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -235,7 +287,47 @@ DASHBOARD_HTML = """
             border-radius: 4px;
             font-size: 13px;
             font-family: monospace;
+            cursor: pointer;
+            transition: background 0.2s;
         }
+        .symbol:hover { background: #30363d; }
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.8);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 1000px;
+            max-height: 90vh;
+            overflow: hidden;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            border-bottom: 1px solid #30363d;
+        }
+        .modal-title { font-size: 18px; font-weight: 600; }
+        .modal-close {
+            background: none;
+            border: none;
+            color: #8b949e;
+            font-size: 24px;
+            cursor: pointer;
+        }
+        .modal-close:hover { color: #c9d1d9; }
+        #chart-container { height: 400px; }
+        #macd-container { height: 150px; border-top: 1px solid #30363d; }
         .refresh-note {
             color: #8b949e;
             font-size: 12px;
@@ -317,6 +409,17 @@ DASHBOARD_HTML = """
         <p class="refresh-note">Auto-refreshes every 30 seconds</p>
     </div>
 
+    <div class="modal-overlay" id="chart-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <span class="modal-title" id="chart-title">Symbol</span>
+                <button class="modal-close" onclick="closeChart()">&times;</button>
+            </div>
+            <div id="chart-container"></div>
+            <div id="macd-container"></div>
+        </div>
+    </div>
+
     <script>
         function formatCurrency(val) {
             return '$' + val.toFixed(2);
@@ -370,11 +473,11 @@ DASHBOARD_HTML = """
                     `}).join('');
                 }
 
-                // Watchlists
+                // Watchlists (clickable to show chart)
                 document.getElementById('stock-watchlist').innerHTML =
-                    (watchlists.stocks || []).map(s => `<span class="symbol">${s}</span>`).join('') || 'None';
+                    (watchlists.stocks || []).map(s => `<span class="symbol" onclick="showChart('${s}')">${s}</span>`).join('') || 'None';
                 document.getElementById('crypto-watchlist').innerHTML =
-                    (watchlists.crypto || []).map(s => `<span class="symbol">${s}</span>`).join('') || 'None';
+                    (watchlists.crypto || []).map(s => `<span class="symbol" onclick="showChart('${s}')">${s}</span>`).join('') || 'None';
 
                 // Jobs
                 const jobsTable = document.getElementById('jobs-table');
@@ -396,6 +499,102 @@ DASHBOARD_HTML = """
 
         fetchData();
         setInterval(fetchData, 30000);
+
+        // Chart functionality
+        let candleChart = null;
+        let macdChart = null;
+
+        async function showChart(symbol) {
+            document.getElementById('chart-modal').classList.add('active');
+            document.getElementById('chart-title').textContent = symbol + ' - 5Min';
+
+            // Clear existing charts
+            document.getElementById('chart-container').innerHTML = '<p style="padding:20px;color:#8b949e">Loading chart...</p>';
+            document.getElementById('macd-container').innerHTML = '';
+
+            try {
+                const data = await fetch(`api/bars/${symbol}?timeframe=5Min&limit=100`).then(r => r.json());
+                if (data.error) {
+                    document.getElementById('chart-container').innerHTML = `<p style="padding:20px;color:#f85149">${data.error}</p>`;
+                    return;
+                }
+
+                // Clear loading message
+                document.getElementById('chart-container').innerHTML = '';
+
+                // Create candlestick chart
+                candleChart = LightweightCharts.createChart(document.getElementById('chart-container'), {
+                    layout: { background: { color: '#161b22' }, textColor: '#c9d1d9' },
+                    grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } },
+                    width: document.getElementById('chart-container').clientWidth,
+                    height: 400,
+                    timeScale: { timeVisible: true, secondsVisible: false },
+                });
+                const candleSeries = candleChart.addCandlestickSeries({
+                    upColor: '#3fb950', downColor: '#f85149',
+                    borderUpColor: '#3fb950', borderDownColor: '#f85149',
+                    wickUpColor: '#3fb950', wickDownColor: '#f85149',
+                });
+                candleSeries.setData(data.candles);
+
+                // Create MACD chart
+                macdChart = LightweightCharts.createChart(document.getElementById('macd-container'), {
+                    layout: { background: { color: '#161b22' }, textColor: '#c9d1d9' },
+                    grid: { vertLines: { color: '#21262d' }, horzLines: { color: '#21262d' } },
+                    width: document.getElementById('macd-container').clientWidth,
+                    height: 150,
+                    timeScale: { timeVisible: true, secondsVisible: false },
+                });
+
+                // MACD line (blue)
+                const macdLine = macdChart.addLineSeries({ color: '#58a6ff', lineWidth: 1 });
+                macdLine.setData(data.macd.map(d => ({ time: d.time, value: d.macd })));
+
+                // Signal line (orange)
+                const signalLine = macdChart.addLineSeries({ color: '#d29922', lineWidth: 1 });
+                signalLine.setData(data.macd.map(d => ({ time: d.time, value: d.signal })));
+
+                // Histogram (green/red bars)
+                const histogram = macdChart.addHistogramSeries({
+                    color: '#3fb950',
+                    priceFormat: { type: 'price' },
+                });
+                histogram.setData(data.macd.map(d => ({
+                    time: d.time,
+                    value: d.histogram,
+                    color: d.histogram >= 0 ? '#3fb950' : '#f85149',
+                })));
+
+                // Fit content
+                candleChart.timeScale().fitContent();
+                macdChart.timeScale().fitContent();
+
+                // Sync time scales
+                candleChart.timeScale().subscribeVisibleTimeRangeChange(() => {
+                    const range = candleChart.timeScale().getVisibleRange();
+                    if (range) macdChart.timeScale().setVisibleRange(range);
+                });
+
+            } catch (e) {
+                document.getElementById('chart-container').innerHTML = `<p style="padding:20px;color:#f85149">Error: ${e}</p>`;
+            }
+        }
+
+        function closeChart() {
+            document.getElementById('chart-modal').classList.remove('active');
+            if (candleChart) { candleChart.remove(); candleChart = null; }
+            if (macdChart) { macdChart.remove(); macdChart = null; }
+        }
+
+        // Close on overlay click
+        document.getElementById('chart-modal').addEventListener('click', (e) => {
+            if (e.target.id === 'chart-modal') closeChart();
+        });
+
+        // Close on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeChart();
+        });
     </script>
 </body>
 </html>
