@@ -7,6 +7,7 @@ Orchestrates all components: signals, processing, execution, monitoring.
 import asyncio
 import signal
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional
 
@@ -17,9 +18,10 @@ from src.bot.processor import SignalProcessor
 from src.bot.scheduler import BotScheduler
 from src.bot.screener import StockScreener, CryptoScreener
 from src.bot.signals.base import Signal
-from src.bot.signals.macd import MACDStrategy
+from src.bot.signals.macd_systems import MACDThreeSystemStrategy
 from src.bot.signals.mean_reversion import MeanReversionStrategy
 from src.bot.state.persistence import BotState
+from src.bot.state.trade_ledger import TradeLedger
 from src.core.alpaca_client import AlpacaClient
 from src.core.order_executor import OrderExecutor
 from src.core.position_manager import PositionManager
@@ -50,7 +52,12 @@ class TradingBot:
 
         # Core components
         self.client = AlpacaClient()
-        self.position_manager = PositionManager()
+        self.trade_ledger = TradeLedger(
+            path="state/trades.json",
+            starting_capital=400.0,
+            goal=4000.0,
+        )
+        self.position_manager = PositionManager(trade_ledger=self.trade_ledger)
         self.order_executor = OrderExecutor(self.client)
 
         # Risk components
@@ -74,13 +81,15 @@ class TradingBot:
         self.bot_state = BotState(self.config.bot_state_file)
 
         # Strategies
-        self.stock_strategy = MACDStrategy(
+        self.stock_strategy = MACDThreeSystemStrategy(
             fast_period=self.config.macd_fast_period,
             slow_period=self.config.macd_slow_period,
             signal_period=self.config.macd_signal_period,
+            zero_line_buffer=self.config.macd_zero_line_buffer,
             atr_stop_multiplier=self.config.stock_atr_stop_multiplier,
             min_signal_strength=self.config.min_signal_strength,
-            risk_reward_target=self.config.min_risk_reward,
+            min_reward_ratio=self.config.min_risk_reward,
+            volume_multiplier=self.config.volume_multiplier,
         )
         self.crypto_strategy = MeanReversionStrategy(
             rsi_period=self.config.crypto_rsi_period,
@@ -106,7 +115,7 @@ class TradingBot:
             client=self.client,
             position_manager=self.position_manager,
             strategies={
-                "macd": self.stock_strategy,
+                "macd_3system": self.stock_strategy,
                 "mean_reversion": self.crypto_strategy,
             },
         )
@@ -261,64 +270,137 @@ class TradingBot:
             print(f"  Could not add stops for {symbol}: {e}")
 
     async def _refresh_watchlist(self) -> None:
-        """Refresh watchlists from screeners."""
+        """Refresh watchlists from screeners, keeping static base list."""
         try:
             print(f"[{datetime.now()}] Refreshing watchlists from screeners...")
 
-            # Get dynamic stock watchlist from screeners
-            new_stocks = set(self.config.stock_symbols)  # Start with config symbols
+            # Start with static base list from config (always included)
+            new_stocks = set(self.config.stock_symbols)
+            print(f"  [WATCHLIST] Base list: {sorted(new_stocks)}")
 
-            # Add top gainers and most active
+            # Supplement with top gainers and most active from screeners
             screener_symbols = self.stock_screener.get_combined_watchlist(
-                include_gainers=True,
-                include_active=True,
-                include_losers=False,  # Skip losers for momentum strategy
-                top_n=5,
+                include_gainers=self.config.screener_include_gainers,
+                include_active=self.config.screener_include_active,
+                include_losers=self.config.screener_include_losers,
+                top_n=self.config.screener_top_n,
             )
-            new_stocks.update(screener_symbols)
+            print(f"  [WATCHLIST] From screeners (raw): {sorted(screener_symbols)}")
 
-            # Check for volume breakouts on existing watchlist
-            if self._stock_watchlist:
-                breakouts = self.stock_screener.get_volume_breakouts(
-                    symbols=list(new_stocks),
-                    volume_threshold=1.5,
-                    lookback_days=20,
-                )
-                for result in breakouts[:5]:  # Top 5 volume breakouts
-                    new_stocks.add(result.symbol)
+            # Filter screener results by minimum price and average daily volume
+            min_price = self.config.screener_min_price
+            min_avg_volume = self.config.screener_min_avg_volume
+            filtered_symbols = []
+            rejected_price = []
+            rejected_volume = []
+            for symbol in screener_symbols:
+                try:
+                    price = self.client.get_latest_price(symbol)
+                    if price < min_price:
+                        rejected_price.append(f"{symbol}(${price:.2f})")
+                        continue
 
-            self._stock_watchlist = list(new_stocks)
+                    # Check average daily volume (20-day)
+                    bars = self.client.get_bars(symbol, timeframe="1Day", limit=20)
+                    if bars is not None and len(bars) >= 10:
+                        avg_volume = float(bars["volume"].mean())
+                        if avg_volume < min_avg_volume:
+                            rejected_volume.append(f"{symbol}({avg_volume/1e6:.1f}M)")
+                            continue
 
-            # Update crypto watchlist with movers
-            new_crypto = set(self.config.crypto_symbols)  # Start with config symbols
-            momentum = self.crypto_screener.get_momentum_crypto()
-            new_crypto.update(momentum)
+                    filtered_symbols.append(symbol)
+                except Exception:
+                    pass  # Skip symbols we can't price/check
+            if rejected_price:
+                print(f"  [WATCHLIST] Rejected (< ${min_price}): {rejected_price}")
+            if rejected_volume:
+                print(f"  [WATCHLIST] Rejected (vol < {min_avg_volume/1e6:.0f}M): {rejected_volume}")
+            print(f"  [WATCHLIST] From screeners: {sorted(filtered_symbols)}")
+            new_stocks.update(filtered_symbols)
+
+            # When warrants (W suffix) are found, also add the common stock
+            # e.g., BNAIW -> also add BNAI
+            warrant_base_stocks = set()
+            for symbol in list(new_stocks):
+                if symbol.endswith("W") and len(symbol) > 1:
+                    base_symbol = symbol[:-1]
+                    warrant_base_stocks.add(base_symbol)
+            if warrant_base_stocks:
+                print(f"  [WATCHLIST] Adding common stocks for warrants: {sorted(warrant_base_stocks)}")
+                new_stocks.update(warrant_base_stocks)
+
+            # Check for volume breakouts on the combined list
+            breakouts = self.stock_screener.get_volume_breakouts(
+                symbols=list(new_stocks),
+                volume_threshold=1.5,
+                lookback_days=20,
+            )
+            breakout_symbols = [r.symbol for r in breakouts[:5]]
+            if breakout_symbols:
+                print(f"  [WATCHLIST] Volume breakouts: {breakout_symbols}")
+            for result in breakouts[:5]:  # Top 5 volume breakouts
+                new_stocks.add(result.symbol)
 
             # Add symbols from open positions to ensure we monitor them
             for pos in self.position_manager.get_open_positions():
                 symbol = pos.symbol
-                # Normalize symbol format (ETHUSD -> ETH/USD)
-                if symbol.endswith("USD") and "/" not in symbol:
-                    normalized = symbol[:-3] + "/USD"
-                    new_crypto.add(normalized)
-                elif "/" in symbol:
-                    new_crypto.add(symbol)
-                else:
+                if "/" not in symbol and not symbol.endswith("USD"):
                     new_stocks.add(symbol)
 
             self._stock_watchlist = list(new_stocks)
-            self._crypto_watchlist = list(new_crypto)
+            print(f"  [WATCHLIST] Final stock watchlist ({len(self._stock_watchlist)}): {sorted(self._stock_watchlist)}")
+
+            # Crypto: only if enabled (disabled until position sizes justify fees)
+            if self.config.enable_crypto_trading:
+                new_crypto = set(self.config.crypto_symbols)
+                momentum = self.crypto_screener.get_momentum_crypto()
+                if momentum:
+                    new_crypto.update(momentum)
+                self._crypto_watchlist = list(new_crypto)
+                print(f"  Crypto: {len(self._crypto_watchlist)} symbols")
+            else:
+                self._crypto_watchlist = []
 
             self.bot_state.update_job_timestamp("watchlist_refresh")
             print(f"  Stocks: {len(self._stock_watchlist)} symbols")
-            print(f"  Crypto: {len(self._crypto_watchlist)} symbols")
 
         except Exception as e:
             print(f"[{datetime.now()}] Watchlist refresh error: {e}")
             # Keep existing watchlists on error
 
+    def _generate_stock_signal_sync(self, symbol: str) -> Optional[Signal]:
+        """Synchronous wrapper for signal generation (for thread pool)."""
+        try:
+            tf_bars = self.client.get_multi_timeframe_bars(
+                symbol,
+                timeframes=[
+                    self.config.stock_higher_timeframe,
+                    self.config.stock_middle_timeframe,
+                    self.config.stock_timeframe,
+                ],
+                limit=100,
+            )
+
+            entry_bars = tf_bars.get(self.config.stock_timeframe)
+            if entry_bars is None or len(entry_bars) < 30:
+                return None
+
+            higher_tf_bars = tf_bars.get(self.config.stock_higher_timeframe)
+            middle_tf_bars = tf_bars.get(self.config.stock_middle_timeframe)
+
+            current_price = self.client.get_latest_price(symbol)
+            return self.stock_strategy.generate(
+                symbol,
+                entry_bars,
+                current_price,
+                higher_tf_bars=higher_tf_bars if higher_tf_bars is not None and len(higher_tf_bars) >= 30 else None,
+                middle_tf_bars=middle_tf_bars if middle_tf_bars is not None and len(middle_tf_bars) >= 30 else None,
+            )
+        except Exception:
+            return None
+
     async def _check_stock_signals(self) -> None:
-        """Check stock watchlist for signals."""
+        """Check stock watchlist for signals (parallelized with thread pool)."""
         if not self._running:
             return
 
@@ -330,24 +412,40 @@ class TradingBot:
         buying_power = float(account.get("buying_power", 0))
         current_positions = len(self.position_manager.get_open_positions())
 
-        for symbol in self._stock_watchlist:
-            # Skip if already have position
-            if self.position_manager.has_position(symbol):
-                continue
+        # Filter symbols to check
+        symbols_to_check = [
+            symbol for symbol in self._stock_watchlist
+            if not self.position_manager.has_position(symbol)
+            and not self.bot_state.has_active_signal(symbol)
+        ]
 
-            # Skip if already have active signal
-            if self.bot_state.has_active_signal(symbol):
-                continue
+        if not symbols_to_check:
+            return
 
-            try:
-                signal = await self._generate_stock_signal(symbol)
-                if signal:
-                    await self._process_signal(signal, equity, buying_power, current_positions)
-            except Exception as e:
-                print(f"  Error checking {symbol}: {e}")
+        # Run signal generation in thread pool for true parallelism
+        loop = asyncio.get_event_loop()
+        all_signals = []
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [
+                loop.run_in_executor(executor, self._generate_stock_signal_sync, symbol)
+                for symbol in symbols_to_check
+            ]
+            results = await asyncio.gather(*futures, return_exceptions=True)
+
+        for symbol, result in zip(symbols_to_check, results):
+            if isinstance(result, Exception):
+                print(f"  Error checking {symbol}: {result}")
+            elif result is not None:
+                all_signals.append(result)
+
+        # Process valid signals sequentially (to respect position limits)
+        for signal in all_signals:
+            await self._process_signal(signal, equity, buying_power, current_positions)
+            current_positions = len(self.position_manager.get_open_positions())
 
     async def _check_crypto_signals(self) -> None:
-        """Check crypto watchlist for signals."""
+        """Check crypto watchlist for signals (parallelized)."""
         if not self._running:
             return
 
@@ -359,33 +457,62 @@ class TradingBot:
         buying_power = float(account.get("buying_power", 0))
         current_positions = len(self.position_manager.get_open_positions())
 
-        for symbol in self._crypto_watchlist:
-            # Skip if already have position
-            if self.position_manager.has_position(symbol):
-                continue
+        # Filter symbols to check
+        symbols_to_check = [
+            symbol for symbol in self._crypto_watchlist
+            if not self.position_manager.has_position(symbol)
+            and not self.bot_state.has_active_signal(symbol)
+        ]
 
-            # Skip if already have active signal
-            if self.bot_state.has_active_signal(symbol):
-                continue
+        if not symbols_to_check:
+            return
 
-            try:
-                signal = await self._generate_crypto_signal(symbol)
-                if signal:
-                    await self._process_signal(signal, equity, buying_power, current_positions)
-            except Exception as e:
-                print(f"  Error checking {symbol}: {e}")
+        # Generate signals in parallel
+        tasks = [self._generate_crypto_signal(symbol) for symbol in symbols_to_check]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Collect valid signals
+        all_signals = []
+        for symbol, result in zip(symbols_to_check, results):
+            if isinstance(result, Exception):
+                print(f"  Error checking {symbol}: {result}")
+            elif result is not None:
+                all_signals.append(result)
+
+        # Process valid signals sequentially
+        for signal in all_signals:
+            await self._process_signal(signal, equity, buying_power, current_positions)
+            current_positions = len(self.position_manager.get_open_positions())
 
     async def _generate_stock_signal(self, symbol: str) -> Optional[Signal]:
-        """Generate signal for a stock symbol."""
+        """Generate signal for a stock symbol using multi-timeframe analysis."""
         try:
-            bars = self.client.get_bars(
-                symbol, timeframe=self.config.stock_timeframe, limit=100
+            # Fetch multi-timeframe bars for System 3 confirmation
+            tf_bars = self.client.get_multi_timeframe_bars(
+                symbol,
+                timeframes=[
+                    self.config.stock_higher_timeframe,  # Daily - bias
+                    self.config.stock_middle_timeframe,  # 4H - confirmation
+                    self.config.stock_timeframe,  # 1H - entry
+                ],
+                limit=100,
             )
-            if bars is None or len(bars) < 30:
+
+            entry_bars = tf_bars.get(self.config.stock_timeframe)
+            if entry_bars is None or len(entry_bars) < 30:
                 return None
 
+            higher_tf_bars = tf_bars.get(self.config.stock_higher_timeframe)
+            middle_tf_bars = tf_bars.get(self.config.stock_middle_timeframe)
+
             current_price = self.client.get_latest_price(symbol)
-            return self.stock_strategy.generate(symbol, bars, current_price)
+            return self.stock_strategy.generate(
+                symbol,
+                entry_bars,
+                current_price,
+                higher_tf_bars=higher_tf_bars if higher_tf_bars is not None and len(higher_tf_bars) >= 30 else None,
+                middle_tf_bars=middle_tf_bars if middle_tf_bars is not None and len(middle_tf_bars) >= 30 else None,
+            )
         except Exception:
             return None
 
@@ -453,11 +580,19 @@ class TradingBot:
         exit_signals = await self.monitor.check_all_positions()
 
         for exit_signal in exit_signals:
-            print(f"[{datetime.now()}] Exit signal: {exit_signal.symbol} - {exit_signal.reason}")
+            symbol = exit_signal.symbol
+            is_crypto = "/" in symbol or symbol.endswith("USD")
+
+            # Check market hours for stocks (crypto trades 24/7)
+            if not is_crypto and not self.scheduler.is_market_open():
+                # Skip stock exit during after hours - will retry when market opens
+                continue
+
+            print(f"[{datetime.now()}] Exit signal: {symbol} - {exit_signal.reason}")
 
             # Execute exit
             exec_result = await self.executor.execute_exit(
-                symbol=exit_signal.symbol,
+                symbol=symbol,
                 reason=exit_signal.reason,
             )
 

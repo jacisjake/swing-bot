@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 import pandas as pd
+from loguru import logger
 
 from src.bot.signals.base import Signal, SignalDirection, SignalGenerator
 from src.core.alpaca_client import AlpacaClient
@@ -126,44 +127,47 @@ class PositionMonitor:
         """
         Check if a position should exit.
 
-        Priority:
+        Checks in order of urgency:
         1. Stop-loss (immediate)
-        2. Trailing stop (immediate)
-        3. Take-profit (immediate)
+        2. Take-profit (immediate)
+        3. Trailing stop (immediate)
         4. Strategy exit signal (normal)
         """
-        # 1. Check stop-loss
+        # Check and apply breakeven stop after 1R profit
+        self._check_breakeven_stop(position)
+
+        # Check stop-loss first (highest priority)
         if position.should_stop_loss():
             return ExitSignal(
                 symbol=position.symbol,
-                reason=f"Stop-loss triggered (${position.stop_loss:.2f})",
+                reason=f"Stop-loss hit @ ${position.stop_loss:.2f}",
                 current_price=current_price,
                 position=position,
                 urgency="immediate",
             )
 
-        # 2. Check trailing stop
-        if position.trailing_stop_pct and position.should_trailing_stop():
-            trail_stop = position.get_trailing_stop_price()
-            return ExitSignal(
-                symbol=position.symbol,
-                reason=f"Trailing stop triggered (${trail_stop:.2f})",
-                current_price=current_price,
-                position=position,
-                urgency="immediate",
-            )
-
-        # 3. Check take-profit
+        # Check take-profit
         if position.should_take_profit():
             return ExitSignal(
                 symbol=position.symbol,
-                reason=f"Take-profit triggered (${position.take_profit:.2f})",
+                reason=f"Take-profit hit @ ${position.take_profit:.2f}",
                 current_price=current_price,
                 position=position,
                 urgency="immediate",
             )
 
-        # 4. Check strategy exit signal
+        # Check trailing stop
+        if position.should_trailing_stop():
+            trailing_price = position.get_trailing_stop_price()
+            return ExitSignal(
+                symbol=position.symbol,
+                reason=f"Trailing stop hit @ ${trailing_price:.2f} (high: ${position.highest_price:.2f})",
+                current_price=current_price,
+                position=position,
+                urgency="immediate",
+            )
+
+        # Check strategy exit signal (MACD crossover)
         if self.strategies:
             exit_reason = await self._check_strategy_exit(position)
             if exit_reason:
@@ -177,6 +181,49 @@ class PositionMonitor:
 
         return None
 
+    def _check_breakeven_stop(self, position: Position) -> None:
+        """
+        Move stop to breakeven after 1R profit is reached.
+
+        1R = initial risk (distance from entry to original stop)
+        When profit >= 1R, move stop_loss to entry_price
+
+        Args:
+            position: Position to check
+        """
+        if position.stop_loss is None:
+            return
+
+        # Calculate initial risk (1R)
+        initial_risk = abs(position.entry_price - position.stop_loss)
+        if initial_risk == 0:
+            return
+
+        # Calculate current profit
+        if position.side == PositionSide.LONG:
+            current_profit = position.current_price - position.entry_price
+            profit_in_r = current_profit / initial_risk
+
+            # Move to breakeven after 1R profit
+            if profit_in_r >= 1.0 and position.stop_loss < position.entry_price:
+                old_stop = position.stop_loss
+                position.stop_loss = position.entry_price
+                logger.info(
+                    f"[BREAKEVEN] {position.symbol}: Moved stop to breakeven "
+                    f"@ ${position.entry_price:.2f} (was ${old_stop:.2f}, profit={profit_in_r:.1f}R)"
+                )
+        else:  # SHORT
+            current_profit = position.entry_price - position.current_price
+            profit_in_r = current_profit / initial_risk
+
+            if profit_in_r >= 1.0 and position.stop_loss > position.entry_price:
+                old_stop = position.stop_loss
+                position.stop_loss = position.entry_price
+                logger.info(
+                    f"[BREAKEVEN] {position.symbol}: Moved stop to breakeven "
+                    f"@ ${position.entry_price:.2f} (was ${old_stop:.2f}, profit={profit_in_r:.1f}R)"
+                )
+
     async def _check_strategy_exit(self, position: Position) -> Optional[str]:
         """
         Check if strategy signals an exit.
@@ -189,14 +236,14 @@ class PositionMonitor:
         """
         # Get strategy that opened the position (stored in metadata or default)
         strategy_name = getattr(position, "strategy", None)
-        strategy = self.strategies.get(strategy_name)
 
+        # If no strategy name, determine by asset type
+        if not strategy_name:
+            is_crypto = "/" in position.symbol or position.symbol.endswith("USD")
+            strategy_name = "mean_reversion" if is_crypto else "macd"
+
+        strategy = self.strategies.get(strategy_name)
         if not strategy:
-            # Try all strategies
-            for name, strat in self.strategies.items():
-                exit_reason = await self._check_with_strategy(position, strat)
-                if exit_reason:
-                    return exit_reason
             return None
 
         return await self._check_with_strategy(position, strategy)
@@ -273,8 +320,9 @@ class PositionMonitor:
         """Get recent price bars for a symbol."""
         try:
             # Determine timeframe based on asset type
+            # Stocks use 5Min (MACD strategy), Crypto uses 1Hour (mean reversion)
             is_crypto = "/" in symbol or symbol.endswith("USD")
-            timeframe = "1Hour" if is_crypto else "1Day"
+            timeframe = "1Hour" if is_crypto else "5Min"
 
             return self.client.get_bars(
                 symbol=symbol,
@@ -312,8 +360,6 @@ class PositionMonitor:
                     "entry_price": p.entry_price,
                     "current_price": p.current_price,
                     "unrealized_pnl": p.unrealized_pnl,
-                    "stop_loss": p.stop_loss,
-                    "take_profit": p.take_profit,
                 }
                 for p in positions
             ],

@@ -55,7 +55,7 @@ class BotConfig(Settings):
         description="How often to check position exits",
     )
     broker_sync_interval_minutes: int = Field(
-        default=5,
+        default=1,
         ge=1,
         le=30,
         description="How often to sync with broker positions",
@@ -67,15 +67,16 @@ class BotConfig(Settings):
         description="How often to refresh watchlist from screeners (during market hours)",
     )
 
-    # Stock strategy settings (MACD)
+    # Stock strategy settings (MACD 3-System)
+    # Per doc: 12/26/9 periods for swing trading
     macd_fast_period: int = Field(
-        default=8,
+        default=12,
         ge=3,
         le=20,
         description="MACD fast EMA period",
     )
     macd_slow_period: int = Field(
-        default=17,
+        default=26,
         ge=10,
         le=50,
         description="MACD slow EMA period",
@@ -86,9 +87,23 @@ class BotConfig(Settings):
         le=20,
         description="MACD signal line EMA period",
     )
+    macd_zero_line_buffer: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=2.0,
+        description="Ignore crossovers within +/- this buffer from zero line",
+    )
     stock_timeframe: str = Field(
-        default="5Min",
-        description="Timeframe for stock signal checking",
+        default="1Hour",
+        description="Entry timeframe for stock signals (System 3 uses Daily/4H/1H)",
+    )
+    stock_higher_timeframe: str = Field(
+        default="1Day",
+        description="Higher timeframe for bias (Daily)",
+    )
+    stock_middle_timeframe: str = Field(
+        default="4Hour",
+        description="Middle timeframe for confirmation (4H)",
     )
     stock_atr_stop_multiplier: float = Field(
         default=2.0,
@@ -143,10 +158,22 @@ class BotConfig(Settings):
         description="Minimum signal strength to act on (0-1)",
     )
     min_risk_reward: float = Field(
-        default=2.0,
+        default=1.5,
         ge=1.0,
         le=5.0,
-        description="Minimum risk/reward ratio to accept trade",
+        description="Minimum risk/reward ratio to accept trade (doc: 1.5)",
+    )
+    allow_short_selling: bool = Field(
+        default=False,
+        description="Allow short selling (requires margin account with shorting enabled)",
+    )
+
+    # Volume filter (relaxed to allow more signals)
+    volume_multiplier: float = Field(
+        default=1.0,
+        ge=0.5,
+        le=3.0,
+        description="Minimum volume ratio vs 20-day avg (1.0 = at least average)",
     )
 
     # Watchlist
@@ -157,6 +184,48 @@ class BotConfig(Settings):
     crypto_watchlist: str = Field(
         default="BTC/USD,ETH/USD,SOL/USD,LINK/USD,AVAX/USD,DOT/USD,XTZ/USD,LTC/USD",
         description="Comma-separated crypto symbols to monitor",
+    )
+
+    # Screener settings
+    enable_screener: bool = Field(
+        default=False,
+        description="Enable dynamic watchlist from screener",
+    )
+    screener_top_n: int = Field(
+        default=10,
+        ge=5,
+        le=50,
+        description="Number of stocks to fetch from each screener",
+    )
+    screener_min_price: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=100.0,
+        description="Minimum stock price for screener results (filters penny stocks)",
+    )
+    screener_include_gainers: bool = Field(
+        default=True,
+        description="Include top gainers in watchlist",
+    )
+    screener_include_active: bool = Field(
+        default=True,
+        description="Include most active in watchlist",
+    )
+    screener_include_losers: bool = Field(
+        default=False,
+        description="Include top losers in watchlist",
+    )
+    screener_min_avg_volume: int = Field(
+        default=1_000_000,
+        ge=100_000,
+        le=50_000_000,
+        description="Minimum average daily volume for watchlist candidates",
+    )
+
+    # Extended hours trading
+    enable_extended_hours: bool = Field(
+        default=False,
+        description="Allow bot to trade during extended hours (pre-market, after-hours)",
     )
 
     # State files
