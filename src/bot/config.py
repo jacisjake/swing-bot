@@ -1,11 +1,12 @@
 """
-Bot-specific configuration.
+Bot-specific configuration for momentum day trading.
 
-Extends base Settings with bot scheduler and strategy parameters.
+Extends base Settings with scanner, strategy, and scheduler parameters.
+Targeting $2-$10 low-float stocks on 5-min bars with pullback entries.
 """
 
 from pathlib import Path
-from typing import Literal
+from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
@@ -15,13 +16,11 @@ from config.settings import Settings
 
 class BotConfig(Settings):
     """
-    Trading bot configuration.
+    Momentum day trading bot configuration.
 
-    Extends base Settings with:
-    - Scheduler settings
-    - Strategy parameters
-    - State file paths
-    - Watchlist symbols
+    Strategy: Ross Cameron-style pullback entries on low-float momentum stocks.
+    Timeframe: 5-minute bars during 7:00-10:00 AM ET window.
+    Goal: One high-quality trade per day, 10% account growth.
     """
 
     model_config = SettingsConfigDict(
@@ -31,28 +30,19 @@ class BotConfig(Settings):
         extra="ignore",
     )
 
-    # Scheduler settings
+    # ── Scheduler Settings ──────────────────────────────────────────────
+
     stock_check_interval_minutes: int = Field(
-        default=5,
-        ge=1,
-        le=60,
-        description="How often to check stock signals (during market hours)",
-    )
-    crypto_check_interval_minutes: int = Field(
-        default=10,
-        ge=1,
-        le=60,
-        description="How often to check crypto signals (24/7)",
-    )
-    enable_crypto_trading: bool = Field(
-        default=False,
-        description="Enable/disable crypto signal checking and trading",
-    )
-    position_monitor_interval_minutes: int = Field(
         default=1,
         ge=1,
-        le=10,
-        description="How often to check position exits",
+        le=60,
+        description="How often to run momentum scan during trading window",
+    )
+    position_monitor_interval_seconds: int = Field(
+        default=30,
+        ge=10,
+        le=120,
+        description="How often to check position exits (seconds)",
     )
     broker_sync_interval_minutes: int = Field(
         default=1,
@@ -60,15 +50,117 @@ class BotConfig(Settings):
         le=30,
         description="How often to sync with broker positions",
     )
-    watchlist_refresh_interval_minutes: int = Field(
-        default=10,
-        ge=5,
-        le=120,
-        description="How often to refresh watchlist from screeners (during market hours)",
+    scanner_refresh_interval_minutes: int = Field(
+        default=2,
+        ge=1,
+        le=30,
+        description="How often to refresh scanner results during trading window",
     )
 
-    # Stock strategy settings (MACD 3-System)
-    # Per doc: 12/26/9 periods for swing trading
+    # ── Trading Window (Eastern Time) ───────────────────────────────────
+
+    premarket_scan_start: str = Field(
+        default="06:00",
+        description="When to start pre-market scanning (ET, HH:MM)",
+    )
+    trading_window_start: str = Field(
+        default="07:00",
+        description="Start of active trading window (ET, HH:MM)",
+    )
+    trading_window_end: str = Field(
+        default="10:00",
+        description="End of active trading window (ET, HH:MM)",
+    )
+
+    # ── Momentum Scanner Settings ───────────────────────────────────────
+    # Ross Cameron's 5 pillars: price, float, relative volume, change%, catalyst
+
+    scanner_min_price: float = Field(
+        default=2.0,
+        ge=0.50,
+        le=20.0,
+        description="Minimum stock price for scanner ($2 for low-priced momentum)",
+    )
+    scanner_max_price: float = Field(
+        default=10.0,
+        ge=2.0,
+        le=50.0,
+        description="Maximum stock price for scanner ($10 sweet spot)",
+    )
+    scanner_min_change_pct: float = Field(
+        default=10.0,
+        ge=5.0,
+        le=50.0,
+        description="Minimum % gain today to qualify (already moving)",
+    )
+    scanner_min_relative_volume: float = Field(
+        default=5.0,
+        ge=1.5,
+        le=20.0,
+        description="Minimum relative volume (today vs 20-day avg, 5x = strong interest)",
+    )
+    scanner_max_float_millions: float = Field(
+        default=20.0,
+        ge=1.0,
+        le=100.0,
+        description="Maximum float in millions (low supply = bigger moves)",
+    )
+    scanner_enable_float_filter: bool = Field(
+        default=True,
+        description="Enable float filtering (requires FMP API key or yfinance)",
+    )
+    scanner_top_n: int = Field(
+        default=20,
+        ge=5,
+        le=50,
+        description="Number of gainers to fetch from Alpaca screener API",
+    )
+
+    # ── Catalyst / News Settings (5th Pillar) ────────────────────────────
+
+    scanner_enable_news_check: bool = Field(
+        default=True,
+        description="Check for news catalysts during enrichment (uses Alpaca News API)",
+    )
+    scanner_news_lookback_hours: int = Field(
+        default=12,
+        ge=1,
+        le=48,
+        description="Hours to look back for news (12h covers overnight + pre-market)",
+    )
+    scanner_news_max_articles: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Max articles to fetch per symbol (minimize API usage)",
+    )
+
+    # ── Press Release Scanner (Pre-Market Catalyst Detection) ────────────
+
+    enable_press_release_scanner: bool = Field(
+        default=True,
+        description="Enable pre-market press release scanning via RSS feeds + FMP",
+    )
+    press_release_scan_start: str = Field(
+        default="04:00",
+        description="When to start scanning press releases (ET, HH:MM). Earlier than premarket scan.",
+    )
+    press_release_scan_interval_minutes: int = Field(
+        default=5,
+        ge=2,
+        le=30,
+        description="How often to poll RSS feeds during pre-market (minutes)",
+    )
+    press_release_lookback_hours: int = Field(
+        default=16,
+        ge=4,
+        le=48,
+        description="Hours to look back for press releases (16h covers overnight + previous evening)",
+    )
+
+    # ── MACD Strategy Parameters ────────────────────────────────────────
+    # Standard 12/26/9 MACD on 5-min bars
+
     macd_fast_period: int = Field(
         default=12,
         ge=3,
@@ -87,70 +179,52 @@ class BotConfig(Settings):
         le=20,
         description="MACD signal line EMA period",
     )
-    macd_zero_line_buffer: float = Field(
-        default=0.5,
-        ge=0.0,
-        le=2.0,
-        description="Ignore crossovers within +/- this buffer from zero line",
-    )
     stock_timeframe: str = Field(
-        default="1Hour",
-        description="Entry timeframe for stock signals (System 3 uses Daily/4H/1H)",
-    )
-    stock_higher_timeframe: str = Field(
-        default="1Day",
-        description="Higher timeframe for bias (Daily)",
-    )
-    stock_middle_timeframe: str = Field(
-        default="4Hour",
-        description="Middle timeframe for confirmation (4H)",
+        default="5Min",
+        description="Entry timeframe for signals (5-min bars for day trading)",
     )
     stock_atr_stop_multiplier: float = Field(
-        default=2.0,
-        ge=1.0,
+        default=1.5,
+        ge=0.5,
         le=4.0,
-        description="ATR multiplier for stock stop-loss",
+        description="ATR multiplier for stop-loss (tighter for day trading)",
     )
-
-    # Crypto strategy settings
-    crypto_rsi_period: int = Field(
+    atr_period: int = Field(
         default=14,
-        ge=7,
-        le=21,
-        description="RSI period for crypto mean reversion",
-    )
-    crypto_rsi_oversold: int = Field(
-        default=30,
-        ge=20,
-        le=40,
-        description="RSI oversold threshold for entry",
-    )
-    crypto_rsi_exit: int = Field(
-        default=50,
-        ge=40,
-        le=60,
-        description="RSI threshold for exit",
-    )
-    crypto_bb_period: int = Field(
-        default=20,
-        ge=10,
+        ge=5,
         le=30,
-        description="Bollinger Band period",
-    )
-    crypto_bb_std: float = Field(
-        default=2.0,
-        ge=1.5,
-        le=3.0,
-        description="Bollinger Band standard deviation",
-    )
-    crypto_atr_stop_multiplier: float = Field(
-        default=2.0,
-        ge=1.0,
-        le=4.0,
-        description="ATR multiplier for crypto stop-loss",
+        description="ATR calculation period",
     )
 
-    # Signal filtering
+    # ── Pullback Pattern Parameters ─────────────────────────────────────
+
+    pullback_min_candles: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description="Minimum candles in pullback before entry",
+    )
+    pullback_max_candles: int = Field(
+        default=8,
+        ge=3,
+        le=15,
+        description="Maximum candles in pullback (too long = momentum lost)",
+    )
+    pullback_max_retracement: float = Field(
+        default=0.50,
+        ge=0.20,
+        le=0.80,
+        description="Maximum pullback retracement of surge (50% = half)",
+    )
+    risk_reward_target: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=5.0,
+        description="Risk/reward ratio for take-profit target",
+    )
+
+    # ── Signal Filtering ────────────────────────────────────────────────
+
     min_signal_strength: float = Field(
         default=0.5,
         ge=0.3,
@@ -158,85 +232,88 @@ class BotConfig(Settings):
         description="Minimum signal strength to act on (0-1)",
     )
     min_risk_reward: float = Field(
-        default=1.5,
-        ge=1.0,
+        default=1.0,
+        ge=0.5,
         le=5.0,
-        description="Minimum risk/reward ratio to accept trade (doc: 1.5)",
+        description="Minimum risk/reward ratio to accept trade",
     )
     allow_short_selling: bool = Field(
         default=False,
-        description="Allow short selling (requires margin account with shorting enabled)",
+        description="Allow short selling (not used in momentum strategy)",
     )
 
-    # Volume filter (relaxed to allow more signals)
-    volume_multiplier: float = Field(
-        default=1.0,
-        ge=0.5,
-        le=3.0,
-        description="Minimum volume ratio vs 20-day avg (1.0 = at least average)",
+    # ── Day Trading Risk Management ─────────────────────────────────────
+
+    max_daily_trades: int = Field(
+        default=1,
+        ge=1,
+        le=5,
+        description="Maximum trades per day (1 = Ross Cameron's cash account approach)",
+    )
+    daily_profit_target_pct: float = Field(
+        default=0.10,
+        ge=0.02,
+        le=0.30,
+        description="Daily profit target (10% of account)",
+    )
+    daily_loss_limit_pct: float = Field(
+        default=0.10,
+        ge=0.02,
+        le=0.20,
+        description="Maximum daily loss before halt (10% of account)",
+    )
+    max_position_pct_of_buying_power: float = Field(
+        default=0.90,
+        ge=0.25,
+        le=1.0,
+        description="Max % of buying power to use per trade (cash account style)",
     )
 
-    # Watchlist
-    stock_watchlist: str = Field(
-        default="AAPL,MSFT,GOOGL,AMZN,NVDA,TSLA,META,AMD,NFLX,SPY",
-        description="Comma-separated stock symbols to monitor",
+    # ── Crypto (disabled for day trading focus) ─────────────────────────
+
+    enable_crypto_trading: bool = Field(
+        default=False,
+        description="Enable crypto trading (disabled for momentum day trading)",
     )
     crypto_watchlist: str = Field(
-        default="BTC/USD,ETH/USD,SOL/USD,LINK/USD,AVAX/USD,DOT/USD,XTZ/USD,LTC/USD",
-        description="Comma-separated crypto symbols to monitor",
+        default="BTC/USD,ETH/USD,SOL/USD",
+        description="Crypto symbols (not used when disabled)",
     )
 
-    # Screener settings
-    enable_screener: bool = Field(
-        default=False,
-        description="Enable dynamic watchlist from screener",
+    # ── Watchlist (scanner-driven, no static list) ──────────────────────
+
+    stock_watchlist: str = Field(
+        default="",
+        description="Static stock watchlist (empty = fully scanner-driven)",
     )
-    screener_top_n: int = Field(
-        default=10,
+
+    # ── WebSocket Settings ────────────────────────────────────────────
+
+    ws_reconnect_max_seconds: int = Field(
+        default=30,
         ge=5,
-        le=50,
-        description="Number of stocks to fetch from each screener",
+        le=120,
+        description="Max reconnect backoff in seconds for WebSocket",
     )
-    screener_min_price: float = Field(
-        default=10.0,
-        ge=1.0,
-        le=100.0,
-        description="Minimum stock price for screener results (filters penny stocks)",
-    )
-    screener_include_gainers: bool = Field(
-        default=True,
-        description="Include top gainers in watchlist",
-    )
-    screener_include_active: bool = Field(
-        default=True,
-        description="Include most active in watchlist",
-    )
-    screener_include_losers: bool = Field(
-        default=False,
-        description="Include top losers in watchlist",
-    )
-    screener_min_avg_volume: int = Field(
-        default=1_000_000,
-        ge=100_000,
-        le=50_000_000,
-        description="Minimum average daily volume for watchlist candidates",
+    ws_heartbeat_seconds: int = Field(
+        default=30,
+        ge=10,
+        le=60,
+        description="WebSocket ping interval in seconds",
     )
 
-    # Extended hours trading
-    enable_extended_hours: bool = Field(
-        default=False,
-        description="Allow bot to trade during extended hours (pre-market, after-hours)",
-    )
+    # ── State Files ─────────────────────────────────────────────────────
 
-    # State files
     state_dir: str = Field(
         default="state",
         description="Directory for state files",
     )
 
+    # ── Properties ──────────────────────────────────────────────────────
+
     @property
     def stock_symbols(self) -> list[str]:
-        """Parse stock watchlist into list."""
+        """Parse stock watchlist into list (may be empty if scanner-driven)."""
         return [s.strip().upper() for s in self.stock_watchlist.split(",") if s.strip()]
 
     @property
