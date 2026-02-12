@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 from src.bot.processor import TradeParams
-from src.core.order_executor import OrderExecutor, OrderResult
+from src.core.order_executor import OrderExecutor, OrderResult, OrderStatus
 from src.core.position_manager import Position, PositionManager, PositionSide
 
 
@@ -27,7 +27,7 @@ class ExecutionResult:
             "success": self.success,
             "order_id": self.order_result.order_id if self.order_result else None,
             "filled_qty": self.order_result.filled_qty if self.order_result else None,
-            "filled_price": self.order_result.avg_fill_price if self.order_result else None,
+            "filled_price": self.order_result.filled_price if self.order_result else None,
             "error": self.error,
             "timestamp": self.timestamp.isoformat(),
         }
@@ -82,30 +82,31 @@ class TradeExecutor:
                     timestamp=timestamp,
                 )
 
-            # Execute order
+            # Execute order (OrderExecutor methods are synchronous)
             if trade_params.order_type == "market":
-                order_result = await self.order_executor.execute_market_order(
+                order_result = self.order_executor.execute_market_order(
                     symbol=symbol,
                     qty=trade_params.quantity,
                     side=trade_params.side,
                     wait_for_fill=True,
                 )
             else:
-                order_result = await self.order_executor.execute_limit_order(
+                order_result = self.order_executor.execute_limit_order(
                     symbol=symbol,
                     qty=trade_params.quantity,
                     side=trade_params.side,
                     limit_price=trade_params.entry_price,
                     wait_for_fill=True,
+                    extended_hours=trade_params.extended_hours,
                 )
 
             # Check if filled
-            if not order_result.is_filled:
+            if not order_result.success or order_result.status != OrderStatus.FILLED:
                 return ExecutionResult(
                     success=False,
                     order_result=order_result,
                     position=None,
-                    error=f"Order not filled: {order_result.status}",
+                    error=f"Order not filled: {order_result.status.value if order_result.status else order_result.error}",
                     timestamp=timestamp,
                 )
 
@@ -116,13 +117,22 @@ class TradeExecutor:
                 else PositionSide.SHORT
             )
 
+            # Calculate trailing stop percentage from ATR if stop_price is set
+            trailing_stop_pct = None
+            if trade_params.stop_price:
+                stop_distance = order_result.filled_price - trade_params.stop_price
+                if stop_distance > 0:
+                    # Use 75% of stop distance for trailing (tighter than initial stop)
+                    trailing_stop_pct = (stop_distance * 0.75) / order_result.filled_price
+
             position = self.position_manager.open_position(
                 symbol=symbol,
                 side=position_side,
                 qty=order_result.filled_qty,
-                entry_price=order_result.avg_fill_price,
+                entry_price=order_result.filled_price,
                 stop_loss=trade_params.stop_price,
                 take_profit=trade_params.target_price,
+                trailing_stop_pct=trailing_stop_pct,
             )
 
             return ExecutionResult(
@@ -176,9 +186,9 @@ class TradeExecutor:
             # Determine exit side
             exit_side = "sell" if position.side == PositionSide.LONG else "buy"
 
-            # Execute exit order
+            # Execute exit order (OrderExecutor methods are synchronous)
             if exit_price:
-                order_result = await self.order_executor.execute_limit_order(
+                order_result = self.order_executor.execute_limit_order(
                     symbol=symbol,
                     qty=position.qty,
                     side=exit_side,
@@ -186,7 +196,7 @@ class TradeExecutor:
                     wait_for_fill=True,
                 )
             else:
-                order_result = await self.order_executor.execute_market_order(
+                order_result = self.order_executor.execute_market_order(
                     symbol=symbol,
                     qty=position.qty,
                     side=exit_side,
@@ -194,19 +204,19 @@ class TradeExecutor:
                 )
 
             # Check if filled
-            if not order_result.is_filled:
+            if not order_result.success or order_result.status != OrderStatus.FILLED:
                 return ExecutionResult(
                     success=False,
                     order_result=order_result,
                     position=position,
-                    error=f"Exit order not filled: {order_result.status}",
+                    error=f"Exit order not filled: {order_result.status.value if order_result.status else order_result.error}",
                     timestamp=timestamp,
                 )
 
             # Close position in manager
             closed_position = self.position_manager.close_position(
                 symbol=symbol,
-                exit_price=order_result.avg_fill_price,
+                exit_price=order_result.filled_price,
                 reason=reason,
             )
 
@@ -238,14 +248,15 @@ class TradeExecutor:
             Number of orders cancelled
         """
         if symbol:
-            orders = await self.order_executor.get_open_orders(symbol)
+            orders = self.order_executor.get_open_orders()
+            orders = [o for o in orders if o["symbol"] == symbol]
             cancelled = 0
             for order in orders:
                 try:
-                    await self.order_executor.cancel_order(order["id"])
+                    self.order_executor.cancel_order(order["id"])
                     cancelled += 1
                 except Exception:
                     pass
             return cancelled
         else:
-            return await self.order_executor.cancel_all_orders()
+            return self.order_executor.cancel_all_orders()

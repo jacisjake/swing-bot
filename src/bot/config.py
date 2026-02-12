@@ -2,7 +2,7 @@
 Bot-specific configuration for momentum day trading.
 
 Extends base Settings with scanner, strategy, and scheduler parameters.
-Targeting $2-$10 low-float stocks on 5-min bars with pullback entries.
+Targeting $1-$10 low-float stocks (prefer $2+) on 5-min bars with pullback entries.
 """
 
 from pathlib import Path
@@ -76,10 +76,16 @@ class BotConfig(Settings):
     # Ross Cameron's 5 pillars: price, float, relative volume, change%, catalyst
 
     scanner_min_price: float = Field(
-        default=2.0,
+        default=1.0,
         ge=0.50,
         le=20.0,
-        description="Minimum stock price for scanner ($2 for low-priced momentum)",
+        description="Minimum stock price for scanner ($1 floor, prefer $2+)",
+    )
+    scanner_preferred_min_price: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=20.0,
+        description="Preferred minimum price — stocks above this get priority weighting",
     )
     scanner_max_price: float = Field(
         default=10.0,
@@ -135,6 +141,13 @@ class BotConfig(Settings):
         description="Max articles to fetch per symbol (minimize API usage)",
     )
 
+    # ── TradingView Screener (Primary Scanner) ──────────────────────────
+
+    use_tradingview_screener: bool = Field(
+        default=True,
+        description="Use TradingView as primary screener (falls back to Alpaca on failure)",
+    )
+
     # ── Press Release Scanner (Pre-Market Catalyst Detection) ────────────
 
     enable_press_release_scanner: bool = Field(
@@ -162,22 +175,22 @@ class BotConfig(Settings):
     # Standard 12/26/9 MACD on 5-min bars
 
     macd_fast_period: int = Field(
-        default=12,
+        default=8,
         ge=3,
         le=20,
-        description="MACD fast EMA period",
+        description="MACD fast EMA period (8 for faster response on volatile stocks)",
     )
     macd_slow_period: int = Field(
-        default=26,
+        default=21,
         ge=10,
         le=50,
-        description="MACD slow EMA period",
+        description="MACD slow EMA period (21 converges faster than 26)",
     )
     macd_signal_period: int = Field(
-        default=9,
-        ge=3,
+        default=5,
+        ge=1,
         le=20,
-        description="MACD signal line EMA period",
+        description="MACD signal line EMA period (5 for quicker crossovers)",
     )
     stock_timeframe: str = Field(
         default="5Min",
@@ -205,16 +218,16 @@ class BotConfig(Settings):
         description="Minimum candles in pullback before entry",
     )
     pullback_max_candles: int = Field(
-        default=8,
+        default=15,
         ge=3,
-        le=15,
-        description="Maximum candles in pullback (too long = momentum lost)",
+        le=25,
+        description="Maximum candles in pullback (volatile stocks consolidate 10-15 candles)",
     )
     pullback_max_retracement: float = Field(
-        default=0.50,
+        default=0.65,
         ge=0.20,
         le=0.80,
-        description="Maximum pullback retracement of surge (50% = half)",
+        description="Maximum pullback retracement of surge (65% for volatile low-float stocks)",
     )
     risk_reward_target: float = Field(
         default=2.0,

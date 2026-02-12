@@ -158,6 +158,86 @@ class PositionSizer:
             capped_by_buying_power=capped_by_bp,
         )
 
+    def calculate_momentum_size(
+        self,
+        account_equity: float,
+        entry_price: float,
+        stop_price: float,
+        buying_power: float,
+        max_equity_pct: float = 0.90,
+    ) -> PositionSize:
+        """
+        Position sizing for momentum day trading (cash account style).
+
+        Uses majority of buying power but still risk-constrained.
+        For low-priced stocks ($2-$10), rounds to whole shares.
+
+        Args:
+            account_equity: Current account equity
+            entry_price: Planned entry price
+            stop_price: Stop-loss price
+            buying_power: Available buying power
+            max_equity_pct: Max % of equity to deploy (0.90 = 90%)
+
+        Returns:
+            PositionSize with calculated values
+        """
+        # Max dollar amount: min of buying power and equity cap
+        max_dollars = min(buying_power, account_equity * max_equity_pct)
+
+        # Calculate risk amount (still respect max risk per trade)
+        risk_amount = account_equity * self.max_position_risk_pct
+        stop_distance = abs(entry_price - stop_price)
+
+        if stop_distance == 0:
+            logger.warning("Stop distance is 0, cannot size position")
+            return PositionSize(
+                shares=0, dollar_amount=0, risk_amount=risk_amount,
+                stop_distance=0, method=SizingMethod.FIXED_FRACTIONAL,
+            )
+
+        # Shares from risk limit
+        shares_from_risk = risk_amount / stop_distance
+
+        # Shares from dollar limit
+        shares_from_dollars = max_dollars / entry_price if entry_price > 0 else 0
+
+        # Use the smaller (risk-constrained)
+        shares = min(shares_from_risk, shares_from_dollars)
+
+        # Round to whole shares for low-priced stocks
+        if entry_price < 10:
+            shares = int(shares)
+
+        if shares <= 0:
+            return PositionSize(
+                shares=0, dollar_amount=0, risk_amount=risk_amount,
+                stop_distance=round(stop_distance, 4),
+                method=SizingMethod.FIXED_FRACTIONAL,
+            )
+
+        dollar_amount = shares * entry_price
+        actual_risk = shares * stop_distance
+
+        capped_by_bp = shares == int(shares_from_dollars) if entry_price < 10 else (
+            abs(shares - shares_from_dollars) < 0.01
+        )
+
+        logger.info(
+            f"Momentum size: {shares} shares @ ${entry_price:.2f} = ${dollar_amount:.2f}, "
+            f"risk=${actual_risk:.2f} ({actual_risk/account_equity*100:.1f}% of equity)"
+        )
+
+        return PositionSize(
+            shares=shares,
+            dollar_amount=round(dollar_amount, 2),
+            risk_amount=round(actual_risk, 2),
+            stop_distance=round(stop_distance, 4),
+            method=SizingMethod.FIXED_FRACTIONAL,
+            capped_by_max_position=False,
+            capped_by_buying_power=capped_by_bp,
+        )
+
     def calculate_atr_based(
         self,
         account_equity: float,

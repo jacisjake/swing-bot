@@ -4,7 +4,7 @@ Algorithmic day/swing trading system for Alpaca API. Designed for small accounts
 
 ## Features
 
-- **MACD Strategy**: Buy on MACD crossover + 2 green candles, exit on red candle + MACD cross down
+- **MACD Strategy**: Buy on MACD crossover + bullish pattern, exit on MACD cross below OR red candle when below signal
 - **Multi-asset support**: Stocks (active), Crypto (paused)
 - **Risk-first design**: Position sizing based on risk, not capital
 - **ATR-based stops**: Dynamic stop-loss based on volatility
@@ -13,12 +13,14 @@ Algorithmic day/swing trading system for Alpaca API. Designed for small accounts
 
 ## Current Strategy
 
-**Stock Trading (MACD Crossover)**
+**Stock Trading (MACD Momentum)**
 - Timeframe: 5-minute bars
 - MACD settings: 8-17-9 (fast)
-- Entry: MACD crosses above signal line + 2 consecutive green candles
-- Exit: Red candle + MACD crosses below signal line
-- Stop-loss: 2x ATR
+- Entry: MACD crosses above signal + (1 green candle OR positive increasing histogram) + volume > 1.2x avg + RSI 30-70
+- Exit: MACD crosses below signal OR (red candle when MACD already below signal)
+- Stop-loss: 2x ATR (enforced)
+- Take-profit: 2x ATR (1:1 R:R)
+- Trailing stop: 75% of stop distance from highest price
 - Signal check: Every 5 minutes during market hours
 
 ## Project Structure
@@ -121,7 +123,8 @@ Key settings in `src/bot/config.py`:
 
 - Max 2% account risk per trade
 - Position size calculated from stop distance
-- ATR-based stops adapt to volatility
+- ATR-based stops and take-profits adapt to volatility
+- Trailing stop locks in profits as price rises
 - Portfolio limits: max drawdown, daily loss, position count
 
 ## License

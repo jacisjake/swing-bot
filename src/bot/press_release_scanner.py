@@ -5,16 +5,19 @@ Polls free RSS feeds from major newswire services (GlobeNewswire, PR Newswire)
 and FMP press release API to find overnight catalyst-driven news for stocks
 that may match the momentum scanner thesis.
 
+Covers ALL sectors — not just biotech/pharma. Major deals, contract awards,
+earnings beats, and strategic partnerships move stocks in every industry.
+
 Runs during pre-market (4:00-7:00 AM ET) to build a "catalyst watchlist"
 before the trading window opens. Stocks found here get priority when the
 momentum scanner runs.
 
 Data flow:
     4:00-7:00 AM ET (every 5 min):
-      1. Poll RSS feeds (GlobeNewswire Biotech/Pharma, PR Newswire Health)
+      1. Poll RSS feeds (GlobeNewswire all-news, PR Newswire multi-sector)
       2. Poll FMP press releases API (if key available)
       3. Extract tickers from headlines / content
-      4. Quick-filter: is the stock $2-$10? Has recent volume?
+      4. Quick-filter: is the stock $1-$10? Has recent volume?
       5. Store as CatalystHit with headline + source
       6. At 7:00 AM: merge catalyst watchlist with scanner results
 """
@@ -33,6 +36,16 @@ from loguru import logger
 # ── RSS Feed URLs (free, no API key) ────────────────────────────────────────
 
 RSS_FEEDS = {
+    # ── GlobeNewswire ──────────────────────────────────────────────────
+    # Main all-news feed (covers every sector — most industry-specific
+    # feeds outside biotech/pharma return empty results)
+    "globenewswire_all": {
+        "url": "https://www.globenewswire.com/RssFeed/feedTitle/GlobeNewswire",
+        "source": "GlobeNewswire",
+        "category": "All",
+    },
+    # Keep biotech/pharma feeds — they reliably return items and we
+    # don't want to miss any if the all-news feed truncates
     "globenewswire_biotech": {
         "url": "https://www.globenewswire.com/RssFeed/industry/4573-Biotechnology/feedTitle/GlobeNewswire+-+Industry+News+on+Biotechnology",
         "source": "GlobeNewswire",
@@ -48,14 +61,46 @@ RSS_FEEDS = {
         "source": "GlobeNewswire",
         "category": "Healthcare",
     },
+    # ── PR Newswire ────────────────────────────────────────────────────
+    # All news (catch-all — every sector)
+    "prnewswire_all": {
+        "url": "https://www.prnewswire.com/rss/news-releases-list.rss",
+        "source": "PR Newswire",
+        "category": "All",
+    },
     "prnewswire_health": {
         "url": "https://www.prnewswire.com/rss/health-latest-news/health-latest-news-list.rss",
         "source": "PR Newswire",
         "category": "Health",
     },
+    "prnewswire_technology": {
+        "url": "https://www.prnewswire.com/rss/technology-latest-news/technology-latest-news-list.rss",
+        "source": "PR Newswire",
+        "category": "Technology",
+    },
+    "prnewswire_energy": {
+        "url": "https://www.prnewswire.com/rss/energy-latest-news/energy-latest-news-list.rss",
+        "source": "PR Newswire",
+        "category": "Energy",
+    },
+    "prnewswire_consumer": {
+        "url": "https://www.prnewswire.com/rss/consumer-products-latest-news/consumer-products-latest-news-list.rss",
+        "source": "PR Newswire",
+        "category": "Consumer",
+    },
+    "prnewswire_entertainment": {
+        "url": "https://www.prnewswire.com/rss/entertainment-media-latest-news/entertainment-media-latest-news-list.rss",
+        "source": "PR Newswire",
+        "category": "Entertainment",
+    },
+    "prnewswire_general_business": {
+        "url": "https://www.prnewswire.com/rss/general-business-latest-news/general-business-latest-news-list.rss",
+        "source": "PR Newswire",
+        "category": "Business",
+    },
 }
 
-# Keywords that suggest a positive catalyst (FDA, contract, earnings beat, etc.)
+# Keywords that suggest a positive catalyst (deals, approvals, earnings, etc.)
 POSITIVE_CATALYST_KEYWORDS = [
     # FDA / regulatory
     "fda approv", "fda grant", "fda accept", "fda clear",
@@ -67,15 +112,46 @@ POSITIVE_CATALYST_KEYWORDS = [
     "positive data", "positive results", "met primary endpoint",
     "statistically significant", "phase 3", "phase iii",
     "topline results", "pivotal trial", "clinical milestone",
-    # Business / financial
+    # Business deals / M&A / mergers (assume all mergers spike volatility)
     "contract award", "receives order", "partnership",
     "collaboration agreement", "license agreement",
+    "strategic agreement", "framework agreement",
+    "exclusive agent", "exclusive partner", "exclusive deal",
+    "joint venture", "signs deal", "signs agreement",
+    "definitive agreement", "merger agreement",
+    "acquisition of", "completes acquisition", "agrees to acquire",
+    "agrees to be acquired", "buyout", "tender offer",
+    "million deal", "billion deal",
+    "merger of", "announces merger", "announces the merger",
+    "to merge with", "merge with", "merges with",
+    "proposed merger", "completed merger", "pending merger",
+    "to be acquired", "acquisition agreement", "acquisition by",
+    # Financial / earnings (earnings announcements spike volatility — worth tracking)
     "revenue increase", "record revenue", "beats estimate",
     "earnings beat", "raises guidance", "increases guidance",
+    "exceeds expectations", "record earnings", "record profit",
     "stock offering", "public offering",
-    # General positive
-    "announces launch", "commercialization", "expansion",
-    "acquisition of", "completes acquisition",
+    "debt reduction", "reduces debt", "pays off debt",
+    "reports earnings", "earnings results", "quarterly results",
+    "quarterly earnings", "annual earnings", "fiscal year results",
+    "financial results", "fourth quarter", "first quarter",
+    "second quarter", "third quarter", "q1 results", "q2 results",
+    "q3 results", "q4 results", "earnings call",
+    "reports first quarter", "reports second quarter",
+    "reports third quarter", "reports fourth quarter",
+    "full year results", "annual results",
+    # Product launches / breakthroughs
+    "announces launch", "product launch", "commercialization",
+    "new product", "next-generation", "next generation",
+    "first-of-its-kind", "first of its kind", "industry first",
+    "breakthrough", "revolutionary", "patent grant", "patent approv",
+    "receives patent", "key patent", "new platform",
+    "unveils", "introduces", "debuts",
+    # Growth / expansion
+    "expansion", "new market", "enters market",
+    "major contract", "government contract", "defense contract",
+    "procurement", "supply agreement",
+    "record orders", "backlog increase", "order backlog",
 ]
 
 # Keywords that suggest a negative catalyst (avoid these)
@@ -90,14 +166,27 @@ NEGATIVE_CATALYST_KEYWORDS = [
     "going concern", "reverse stock split",
 ]
 
-# Common ticker extraction patterns
-# Matches: "(NASDAQ: ABCD)", "(NYSE: XYZ)", "(OTC: WXYZ)", "(ticker: ABCD)"
+# US exchange ticker patterns — only match stocks listed on US exchanges.
+# Pattern 1: Explicit US exchange reference like "(NASDAQ: ABCD)" — guaranteed US-listed.
+# Pattern 2: Generic "(ticker: ABCD)" — needs Alpaca validation.
+# Pattern 3: Company name suffix like "Inc. (ABCD)" — needs Alpaca validation.
+US_EXCHANGE_PATTERN = re.compile(
+    r"\((?:NASDAQ|NYSE|NYSEAMERICAN|OTC(?:QB|QX)?|AMEX|CBOE)\s*:\s*([A-Z]{1,5})\)",
+    re.IGNORECASE,
+)
 TICKER_PATTERNS = [
-    re.compile(r"\((?:NASDAQ|NYSE|NYSEAMERICAN|OTC(?:QB|QX)?|AMEX|CBOE)\s*:\s*([A-Z]{1,5})\)", re.IGNORECASE),
+    US_EXCHANGE_PATTERN,
     re.compile(r"\((?:ticker|stock|symbol)\s*:\s*([A-Z]{1,5})\)", re.IGNORECASE),
     # Matches: "ABCD" after company name patterns
     re.compile(r"(?:Inc\.|Corp\.|Ltd\.|LLC|Company|Therapeutics|Pharmaceuticals|Biosciences|Biotech)\s*\(([A-Z]{1,5})\)"),
 ]
+
+# Non-US exchanges to reject (common in GlobeNewswire all-news feed)
+NON_US_EXCHANGE_PATTERNS = re.compile(
+    r"\((?:TSX|TSXV|TSE|LSE|LON|ASX|HKG|HKEX|SGX|KRX|TYO|FRA|ETR|SWX"
+    r"|BMV|JSE|NSE|BSE|MOEX|B3|BVMF|NZX|OSE|HEL|CPH|STO|WSE)\s*:\s*[A-Z]",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -159,6 +248,11 @@ class PressReleaseScanner:
         self._hits: list[CatalystHit] = []
         self._last_scan_time: Optional[datetime] = None
         self._seen_urls: set[str] = set()  # Dedup across scans within same day
+
+        # US-exchange validation cache (avoid repeated Alpaca API calls)
+        # Maps ticker -> True (US-tradable) or False (not found / non-US)
+        self._us_ticker_cache: dict[str, bool] = {}
+        self._trading_client = None  # Lazy-init for ticker validation
 
         # Rate limiting for RSS feeds
         self._last_feed_fetch: dict[str, float] = {}
@@ -248,6 +342,7 @@ class PressReleaseScanner:
         """Reset for a new trading day."""
         self._hits.clear()
         self._seen_urls.clear()
+        self._us_ticker_cache.clear()
         self._last_scan_time = None
         logger.info("[PR-SCAN] Daily reset — cleared all catalyst hits")
 
@@ -472,12 +567,16 @@ class PressReleaseScanner:
 
     def _extract_ticker(self, text: str) -> Optional[str]:
         """
-        Extract a stock ticker symbol from press release text.
+        Extract a US-listed stock ticker from press release text.
+
+        Only returns tickers for stocks traded on US exchanges (NASDAQ, NYSE,
+        AMEX, OTC). Rejects tickers from TSX, LSE, ASX, and other non-US
+        exchanges.
 
         Looks for patterns like:
-        - "(NASDAQ: ABCD)"
-        - "(NYSE: XYZ)"
-        - "Company Inc. (ABCD)"
+        - "(NASDAQ: ABCD)" — guaranteed US-listed
+        - "(NYSE: XYZ)" — guaranteed US-listed
+        - "Company Inc. (ABCD)" — validated via Alpaca API
 
         Args:
             text: Combined title + description text
@@ -485,15 +584,65 @@ class PressReleaseScanner:
         Returns:
             Ticker symbol (uppercase) or None
         """
+        # Quick reject: if the text mentions a non-US exchange, skip entirely
+        if NON_US_EXCHANGE_PATTERNS.search(text):
+            return None
+
         for pattern in TICKER_PATTERNS:
             match = pattern.search(text)
             if match:
                 ticker = match.group(1).upper()
                 # Basic validation: 1-5 uppercase letters, not a common word
-                if self._is_valid_ticker(ticker):
+                if not self._is_valid_ticker(ticker):
+                    continue
+
+                # If matched via the explicit US exchange pattern, it's good
+                if pattern is US_EXCHANGE_PATTERN:
+                    return ticker
+
+                # Otherwise validate it's actually US-tradable
+                if self._is_us_tradable(ticker):
                     return ticker
 
         return None
+
+    def _is_us_tradable(self, ticker: str) -> bool:
+        """
+        Check if a ticker is tradable on US exchanges via Alpaca.
+
+        Uses a cache to avoid hammering the API. Tickers confirmed once
+        stay cached for the entire session (daily reset clears cache).
+
+        Args:
+            ticker: Uppercase ticker symbol
+
+        Returns:
+            True if the symbol is active and tradable on Alpaca
+        """
+        if ticker in self._us_ticker_cache:
+            return self._us_ticker_cache[ticker]
+
+        try:
+            if self._trading_client is None:
+                from alpaca.trading.client import TradingClient
+                from config.settings import get_settings
+
+                settings = get_settings()
+                self._trading_client = TradingClient(
+                    api_key=settings.alpaca_api_key,
+                    secret_key=settings.alpaca_secret_key,
+                    paper=settings.is_paper,
+                )
+
+            asset = self._trading_client.get_asset(ticker)
+            is_tradable = bool(asset.tradable and asset.status.value == "active")
+            self._us_ticker_cache[ticker] = is_tradable
+            return is_tradable
+
+        except Exception:
+            # Symbol not found or API error — assume not US-tradable
+            self._us_ticker_cache[ticker] = False
+            return False
 
     @staticmethod
     def _is_valid_ticker(ticker: str) -> bool:

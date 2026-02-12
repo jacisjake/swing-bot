@@ -116,6 +116,7 @@ class OrderExecutor:
         side: str,
         limit_price: float,
         wait_for_fill: bool = False,
+        extended_hours: bool = False,
     ) -> OrderResult:
         """
         Execute a limit order with retries.
@@ -137,6 +138,7 @@ class OrderExecutor:
             side=side,
             limit_price=limit_price,
             wait_for_fill=wait_for_fill,
+            extended_hours=extended_hours,
         )
 
     def execute_stop_limit_order(
@@ -189,6 +191,7 @@ class OrderExecutor:
         stop_price: Optional[float] = None,
         trail_percent: Optional[float] = None,
         wait_for_fill: bool = True,
+        extended_hours: bool = False,
     ) -> OrderResult:
         """
         Execute order with retry logic.
@@ -208,6 +211,7 @@ class OrderExecutor:
                     limit_price=limit_price,
                     stop_price=stop_price,
                     trail_percent=trail_percent,
+                    extended_hours=extended_hours,
                 )
 
                 if order is None:
@@ -257,14 +261,27 @@ class OrderExecutor:
         limit_price: Optional[float] = None,
         stop_price: Optional[float] = None,
         trail_percent: Optional[float] = None,
+        extended_hours: bool = False,
     ) -> dict:
         """Submit order to Alpaca based on type."""
+        # Check if asset supports fractional shares
+        if not self.client.is_fractionable(symbol):
+            # Round to whole shares for non-fractionable assets
+            original_qty = qty
+            qty = int(qty)
+            if qty < 1:
+                raise ValueError(f"Cannot buy less than 1 share of {symbol} (non-fractionable)")
+            if qty != original_qty:
+                logger.info(f"Rounded {symbol} qty from {original_qty:.6f} to {qty} (non-fractionable)")
+
         if order_type == "market":
             return self.client.submit_market_order(symbol, qty, side)
         elif order_type == "limit":
             if limit_price is None:
                 raise ValueError("limit_price required for limit orders")
-            return self.client.submit_limit_order(symbol, qty, side, limit_price)
+            return self.client.submit_limit_order(
+                symbol, qty, side, limit_price, extended_hours=extended_hours
+            )
         elif order_type == "stop_limit":
             if stop_price is None or limit_price is None:
                 raise ValueError("stop_price and limit_price required for stop-limit")

@@ -229,11 +229,18 @@ class PositionManager:
     - Sync with Alpaca positions
     """
 
-    def __init__(self):
+    def __init__(self, trade_ledger=None):
+        """
+        Initialize position manager.
+
+        Args:
+            trade_ledger: Optional TradeLedger for persistent trade recording
+        """
         self.positions: dict[str, Position] = {}
         self.closed_positions: list[Position] = []
         self._peak_equity: float = 0.0
         self._starting_equity: float = 0.0
+        self.trade_ledger = trade_ledger
 
     def sync_with_broker(self, broker_positions: list[dict], equity: float) -> None:
         """
@@ -272,6 +279,9 @@ class PositionManager:
                 pos = self.positions.pop(symbol)
                 pos.close(pos.current_price, "closed_externally")
                 self.closed_positions.append(pos)
+                # Record to persistent trade ledger
+                if self.trade_ledger:
+                    self.trade_ledger.record_trade(pos)
                 logger.info(f"Position closed externally: {symbol}")
 
     def open_position(
@@ -328,6 +338,10 @@ class PositionManager:
         position = self.positions.pop(symbol)
         position.close(exit_price, reason)
         self.closed_positions.append(position)
+
+        # Record to persistent trade ledger
+        if self.trade_ledger:
+            self.trade_ledger.record_trade(position)
 
         pnl = position.realized_pnl or 0
         logger.info(

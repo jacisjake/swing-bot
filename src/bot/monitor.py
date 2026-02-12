@@ -11,9 +11,13 @@ from typing import Optional
 import pandas as pd
 from loguru import logger
 
+import pytz
+
 from src.bot.signals.base import Signal, SignalDirection, SignalGenerator
 from src.core.alpaca_client import AlpacaClient
 from src.core.position_manager import Position, PositionManager, PositionSide
+
+ET = pytz.timezone("America/New_York")
 
 
 @dataclass
@@ -53,6 +57,7 @@ class PositionMonitor:
         client: AlpacaClient,
         position_manager: PositionManager,
         strategies: Optional[dict[str, SignalGenerator]] = None,
+        trading_window_end: str = "10:00",
     ):
         """
         Initialize position monitor.
@@ -61,10 +66,16 @@ class PositionMonitor:
             client: Alpaca API client
             position_manager: Position tracking
             strategies: Optional dict of strategy name -> generator for exit signals
+            trading_window_end: End of trading window (HH:MM ET) for time-based exit
         """
         self.client = client
         self.position_manager = position_manager
         self.strategies = strategies or {}
+
+        # Parse trading window end for time-based exit
+        parts = trading_window_end.split(":")
+        from datetime import time
+        self._window_end = time(int(parts[0]), int(parts[1]))
 
     async def check_all_positions(self) -> list[ExitSignal]:
         """
@@ -119,6 +130,75 @@ class PositionMonitor:
         position.update_price(price)
         return await self._check_position_exit(position, price)
 
+    async def check_position_at_price(
+        self, symbol: str, price: float
+    ) -> Optional[ExitSignal]:
+        """
+        Check a position for exit at a given price (quote-driven).
+
+        Called by StreamHandler on every quote update. Only checks fast
+        exit conditions (stops, targets, trailing) — skips expensive
+        strategy exit checks (those run on 5-min bar close instead).
+
+        Args:
+            symbol: Position symbol
+            price: Current price from quote stream
+
+        Returns:
+            ExitSignal if should exit, None otherwise
+        """
+        position = self.position_manager.get_position(symbol)
+        if not position:
+            return None
+
+        position.update_price(price)
+
+        # Time-based exit
+        if self._is_past_trading_window():
+            return ExitSignal(
+                symbol=position.symbol,
+                reason=f"Time exit: past trading window ({self._window_end.strftime('%H:%M')} ET)",
+                current_price=price,
+                position=position,
+                urgency="immediate",
+            )
+
+        # Breakeven stop adjustment
+        self._check_breakeven_stop(position)
+
+        # Stop-loss
+        if position.should_stop_loss():
+            return ExitSignal(
+                symbol=position.symbol,
+                reason=f"Stop-loss hit @ ${position.stop_loss:.2f}",
+                current_price=price,
+                position=position,
+                urgency="immediate",
+            )
+
+        # Take-profit
+        if position.should_take_profit():
+            return ExitSignal(
+                symbol=position.symbol,
+                reason=f"Take-profit hit @ ${position.take_profit:.2f}",
+                current_price=price,
+                position=position,
+                urgency="immediate",
+            )
+
+        # Trailing stop
+        if position.should_trailing_stop():
+            trailing_price = position.get_trailing_stop_price()
+            return ExitSignal(
+                symbol=position.symbol,
+                reason=f"Trailing stop hit @ ${trailing_price:.2f} (high: ${position.highest_price:.2f})",
+                current_price=price,
+                position=position,
+                urgency="immediate",
+            )
+
+        return None
+
     async def _check_position_exit(
         self,
         position: Position,
@@ -128,11 +208,22 @@ class PositionMonitor:
         Check if a position should exit.
 
         Checks in order of urgency:
-        1. Stop-loss (immediate)
-        2. Take-profit (immediate)
-        3. Trailing stop (immediate)
-        4. Strategy exit signal (normal)
+        1. Time-based exit (past trading window)
+        2. Stop-loss (immediate)
+        3. Take-profit (immediate)
+        4. Trailing stop (immediate)
+        5. Strategy exit signal (normal)
         """
+        # Check time-based exit first (day trading: close after window)
+        if self._is_past_trading_window():
+            return ExitSignal(
+                symbol=position.symbol,
+                reason=f"Time exit: past trading window ({self._window_end.strftime('%H:%M')} ET)",
+                current_price=current_price,
+                position=position,
+                urgency="immediate",
+            )
+
         # Check and apply breakeven stop after 1R profit
         self._check_breakeven_stop(position)
 
@@ -224,6 +315,42 @@ class PositionMonitor:
                     f"@ ${position.entry_price:.2f} (was ${old_stop:.2f}, profit={profit_in_r:.1f}R)"
                 )
 
+    def _is_past_trading_window(self) -> bool:
+        """
+        Check if current time is past the trading window end (ET).
+
+        Uses Alpaca market clock to detect holidays (don't force-close
+        positions on non-trading days when the time coincidentally matches).
+        """
+        now_et = datetime.now(ET)
+
+        # Weekend check (fast path)
+        if now_et.weekday() >= 5:
+            return False
+
+        # Use Alpaca market clock to check if today is a trading day
+        # Don't force time-exit on holidays when market is closed
+        try:
+            clock = self.client.trading.get_clock()
+            if not clock.is_open:
+                # Market is closed — check if it was open today at all
+                # If next_open is today, market hasn't opened yet (pre-market)
+                # If next_open is tomorrow+, today might be a holiday
+                if hasattr(clock.next_open, "astimezone"):
+                    next_open_et = clock.next_open.astimezone(ET)
+                else:
+                    next_open_et = clock.next_open
+
+                if next_open_et.date() > now_et.date() and now_et.time() < self._window_end:
+                    # Holiday: next open is a future day and we haven't hit window end
+                    # Don't trigger time exit
+                    return False
+        except Exception:
+            pass  # Fall through to simple time check
+
+        current_time = now_et.time()
+        return current_time >= self._window_end
+
     async def _check_strategy_exit(self, position: Position) -> Optional[str]:
         """
         Check if strategy signals an exit.
@@ -237,10 +364,9 @@ class PositionMonitor:
         # Get strategy that opened the position (stored in metadata or default)
         strategy_name = getattr(position, "strategy", None)
 
-        # If no strategy name, determine by asset type
+        # If no strategy name, default to momentum_pullback
         if not strategy_name:
-            is_crypto = "/" in position.symbol or position.symbol.endswith("USD")
-            strategy_name = "mean_reversion" if is_crypto else "macd"
+            strategy_name = "momentum_pullback"
 
         strategy = self.strategies.get(strategy_name)
         if not strategy:
@@ -290,7 +416,7 @@ class PositionMonitor:
 
         except Exception as e:
             # Don't exit on errors, just log
-            print(f"Error checking strategy exit for {position.symbol}: {e}")
+            logger.error(f"Error checking strategy exit for {position.symbol}: {e}")
             return None
 
     async def _get_current_prices(self, symbols: list[str]) -> dict[str, float]:

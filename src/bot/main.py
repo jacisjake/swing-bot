@@ -2,7 +2,7 @@
 Momentum day trading bot.
 
 Orchestrates all components: scanner, signals, processing, execution, monitoring.
-Targets low-float stocks ($2-$10) with pullback entries on 5-min bars.
+Targets low-float stocks ($1-$10, prefer $2+) with pullback entries on 5-min bars.
 
 Architecture:
 - WebSocket streaming for real-time bars, quotes, trade updates, news
@@ -27,6 +27,7 @@ from src.bot.press_release_scanner import PressReleaseScanner
 from src.bot.processor import SignalProcessor
 from src.bot.scheduler import BotScheduler
 from src.bot.screener import MomentumScreener
+from src.bot.tradingview_screener import TradingViewScreener
 from src.bot.signals.base import Signal
 from src.bot.signals.momentum_pullback import MomentumPullbackStrategy
 from src.bot.state.persistence import BotState
@@ -84,13 +85,18 @@ class TradingBot:
             fmp_api_key=self.config.fmp_api_key,
         )
 
-        # Momentum scanner (with news/catalyst support)
+        # TradingView screener (primary scanner, no API key required)
+        self.tv_screener = TradingViewScreener() if self.config.use_tradingview_screener else None
+
+        # Momentum scanner (TradingView primary, Alpaca fallback)
         self.momentum_scanner = MomentumScreener(
             float_provider=self.float_provider,
             alpaca_client=self.client,
             news_enabled=self.config.scanner_enable_news_check,
             news_lookback_hours=self.config.scanner_news_lookback_hours,
             news_max_articles=self.config.scanner_news_max_articles,
+            tv_screener=self.tv_screener,
+            use_tradingview=self.config.use_tradingview_screener,
         )
 
         # Press release scanner (pre-market catalyst detection)
@@ -192,6 +198,9 @@ class TradingBot:
             f"  Scanner: ${self.config.scanner_min_price}-${self.config.scanner_max_price}, "
             f"{self.config.scanner_min_change_pct}%+ change, "
             f"{self.config.scanner_min_relative_volume}x+ relVol"
+        )
+        logger.info(
+            f"  Primary screener: {'TradingView' if self.config.use_tradingview_screener else 'Alpaca'}"
         )
 
         # 1. Initial sync with broker (REST, one-time)
@@ -362,6 +371,7 @@ class TradingBot:
             candidates = self.momentum_scanner.scan(
                 min_price=self.config.scanner_min_price,
                 max_price=self.config.scanner_max_price,
+                preferred_min_price=self.config.scanner_preferred_min_price,
                 min_change_pct=self.config.scanner_min_change_pct,
                 min_relative_volume=self.config.scanner_min_relative_volume,
                 max_float_millions=self.config.scanner_max_float_millions,
@@ -422,8 +432,10 @@ class TradingBot:
             if self.bot_state.has_active_signal(symbol):
                 continue
 
-            # Generate signal from 5-min bars
-            gen_signal = await self._generate_signal(symbol)
+            # Generate signal from 5-min bars (catalyst boosts signal strength)
+            gen_signal = await self._generate_signal(
+                symbol, has_catalyst=candidate.has_catalyst
+            )
             if gen_signal is None:
                 continue
 
@@ -450,12 +462,15 @@ class TradingBot:
                 logger.info(f"[TRADE] Trade #{self._daily_trades_today} executed for {symbol}")
                 return  # One trade per day
 
-    async def _generate_signal(self, symbol: str) -> Optional[Signal]:
+    async def _generate_signal(
+        self, symbol: str, has_catalyst: bool = False
+    ) -> Optional[Signal]:
         """
         Generate a signal for a symbol using 5-min bars.
 
         Args:
             symbol: Stock ticker
+            has_catalyst: Whether the stock has a news catalyst (boosts signal strength)
 
         Returns:
             Signal if pullback pattern found, None otherwise
@@ -474,7 +489,9 @@ class TradingBot:
                 return None
 
             current_price = self.client.get_latest_price(symbol)
-            return self.strategy.generate(symbol, bars, current_price)
+            return self.strategy.generate(
+                symbol, bars, current_price, has_catalyst=has_catalyst
+            )
 
         except Exception as e:
             logger.debug(f"[SIGNAL] {symbol}: error generating signal: {e}")
@@ -738,6 +755,14 @@ class TradingBot:
                 "trades_today": self._daily_trades_today,
                 "max_daily_trades": self.config.max_daily_trades,
                 "scanner_hits": len(self._scanner_results),
+            },
+            "tradingview": {
+                "enabled": self.config.use_tradingview_screener,
+                "last_query": (
+                    self.tv_screener.last_query_time.isoformat()
+                    if self.tv_screener and self.tv_screener.last_query_time
+                    else None
+                ),
             },
             "websocket": self.ws_client.get_status(),
             "stream": self.stream_handler.get_status(),

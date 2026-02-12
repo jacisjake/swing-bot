@@ -5,6 +5,7 @@ Validates signals, applies risk checks, and calculates position sizes.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 from src.bot.config import BotConfig
@@ -29,6 +30,7 @@ class TradeParams:
     order_type: str  # "market" or "limit"
     time_in_force: str  # "day" or "gtc"
     signal: Signal
+    extended_hours: bool = False
 
     @property
     def is_crypto(self) -> bool:
@@ -46,6 +48,7 @@ class TradeParams:
             "time_in_force": self.time_in_force,
             "signal_strength": self.signal.strength,
             "strategy": self.signal.strategy,
+            "extended_hours": self.extended_hours,
         }
 
 
@@ -135,11 +138,14 @@ class SignalProcessor:
             warnings.append(f"Warning: {limits_check.message}")
 
         # Step 3: Calculate position size
-        size_result = self.position_sizer.calculate_fixed_fractional(
+        # Use momentum sizing for day trading (majority of buying power)
+        max_bp_pct = getattr(self.config, 'max_position_pct_of_buying_power', 0.90)
+        size_result = self.position_sizer.calculate_momentum_size(
             account_equity=account_equity,
             entry_price=signal.entry_price,
             stop_price=signal.stop_price,
             buying_power=buying_power,
+            max_equity_pct=max_bp_pct,
         )
 
         if size_result.shares < 0.001:  # Effectively zero
@@ -156,7 +162,24 @@ class SignalProcessor:
         if size_result.capped_by_max_position:
             warnings.append(f"Position capped by max position limit: {size_result.shares:.4f} shares")
 
-        # Step 4: Build trade parameters
+        # Determine if extended hours are needed
+        now = datetime.now()
+        current_hour = now.hour
+        current_minute = now.minute
+        
+        # Simple market hours check (9:30 - 16:00)
+        is_market_hours = (
+            (current_hour > 9 or (current_hour == 9 and current_minute >= 30)) and
+            (current_hour < 16)
+        )
+        
+        use_extended_hours = self.config.enable_extended_hours and not is_market_hours
+        
+        # Force limit orders during extended hours
+        order_type = "market"
+        if use_extended_hours:
+            order_type = "limit"
+        
         trade_params = TradeParams(
             symbol=signal.symbol,
             side="buy" if signal.direction == SignalDirection.LONG else "sell",
@@ -164,9 +187,10 @@ class SignalProcessor:
             entry_price=signal.entry_price,
             stop_price=signal.stop_price,
             target_price=signal.target_price,
-            order_type="market",  # Use market for entries
+            order_type=order_type,  # Adjusted for extended hours
             time_in_force="gtc" if signal.is_crypto else "day",
             signal=signal,
+            extended_hours=use_extended_hours,
         )
 
         return ProcessResult(
@@ -182,17 +206,23 @@ class SignalProcessor:
 
         Returns rejection reason or None if passed.
         """
+        # Check if shorting is allowed
+        if signal.direction.value == "short" and not self.config.allow_short_selling:
+            return "Short selling disabled"
+
         # Check strength
         if signal.strength < self.config.min_signal_strength:
             return f"Signal too weak: {signal.strength:.2f} < {self.config.min_signal_strength}"
 
-        # Check R:R ratio
+        # Check R:R ratio (use small epsilon for floating point comparison)
         if signal.risk_reward_ratio:
-            if signal.risk_reward_ratio < self.config.min_risk_reward:
+            if signal.risk_reward_ratio < self.config.min_risk_reward - 0.01:
                 return f"R:R too low: {signal.risk_reward_ratio:.2f} < {self.config.min_risk_reward}"
 
         # Check risk percent isn't too high
-        if signal.risk_percent > 0.10:  # More than 10% stop distance
-            return f"Stop too wide: {signal.risk_percent:.1%} risk"
+        # Allow wider stops for low-priced volatile stocks (up to 15%)
+        max_stop_pct = 0.15
+        if signal.risk_percent > max_stop_pct:
+            return f"Stop too wide: {signal.risk_percent:.1%} risk (max {max_stop_pct:.0%})"
 
         return None

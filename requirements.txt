@@ -21,6 +21,18 @@ websockets>=12.0
 # Database (for trade history)
 sqlalchemy>=2.0.0
 
+# HTTP requests (for float data provider)
+requests>=2.31.0
+
+# Timezone handling
+pytz>=2023.3
+
+# Float data fallback (optional)
+yfinance>=0.2.36
+
+# TradingView screener (pre-market scanner, no API key required)
+tradingview-screener>=3.0.0
+
 # Scheduling
 apscheduler>=3.10.0
 

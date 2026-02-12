@@ -82,10 +82,10 @@ def show_config():
     print(f"  Crypto Check Interval: {config.crypto_check_interval_minutes} min")
     print(f"  Position Monitor: {config.position_monitor_interval_minutes} min")
     print()
-    print("Stock Strategy (Breakout):")
-    print(f"  Entry Period: {config.stock_entry_period} days")
-    print(f"  Exit Period: {config.stock_exit_period} days")
-    print(f"  Volume Multiplier: {config.stock_volume_multiplier}x")
+    print("Stock Strategy (MACD):")
+    print(f"  Fast Period: {config.macd_fast_period} days")
+    print(f"  Slow Period: {config.macd_slow_period} days")
+    print(f"  Signal Period: {config.macd_signal_period}x")
     print(f"  ATR Stop Multiplier: {config.stock_atr_stop_multiplier}x")
     print()
     print("Crypto Strategy (Mean Reversion):")
@@ -162,17 +162,18 @@ async def show_status():
 async def check_signals_once():
     """Check for signals once and display results."""
     from src.bot.config import get_bot_config
-    from src.bot.signals.breakout import BreakoutStrategy
+    from src.bot.signals.macd import MACDStrategy
     from src.bot.signals.mean_reversion import MeanReversionStrategy
     from src.core.alpaca_client import AlpacaClient
 
     config = get_bot_config()
     client = AlpacaClient()
 
-    stock_strategy = BreakoutStrategy(
-        entry_period=config.stock_entry_period,
-        exit_period=config.stock_exit_period,
-        volume_multiplier=config.stock_volume_multiplier,
+    stock_strategy = MACDStrategy(
+        fast_period=config.macd_fast_period,
+        slow_period=config.macd_slow_period,
+        signal_period=config.macd_signal_period,
+        atr_stop_multiplier=config.stock_atr_stop_multiplier,
     )
     crypto_strategy = MeanReversionStrategy(
         rsi_period=config.crypto_rsi_period,
@@ -187,7 +188,7 @@ async def check_signals_once():
     print("Checking stocks...")
     for symbol in config.stock_symbols:
         try:
-            bars = client.get_bars(symbol, timeframe="1Day", limit=50)
+            bars = client.get_bars(symbol, timeframe=config.stock_timeframe, limit=50)
             if bars is not None and len(bars) >= 25:
                 price = client.get_latest_price(symbol)
                 signal = stock_strategy.generate(symbol, bars, price)

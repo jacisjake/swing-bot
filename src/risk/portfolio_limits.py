@@ -67,6 +67,7 @@ class DailyStats:
     trades_closed: int = 0
     winning_trades: int = 0
     losing_trades: int = 0
+    trades_entered_today: int = 0  # Day trading: count entries for daily limit
 
     @property
     def daily_pnl(self) -> float:
@@ -99,8 +100,9 @@ class PortfolioLimits:
     def __init__(
         self,
         max_drawdown_pct: Optional[float] = None,
-        max_daily_loss_pct: float = 0.03,  # 3% daily loss limit
+        max_daily_loss_pct: float = 0.10,  # 10% daily loss limit (day trading)
         max_positions: Optional[int] = None,
+        max_daily_trades: int = 1,  # One trade per day (cash account approach)
         max_sector_exposure_pct: float = 0.40,  # 40% max in one sector
         max_correlation: float = 0.70,  # Warn if positions too correlated
         warning_threshold_pct: float = 0.70,  # Warn at 70% of limit
@@ -110,8 +112,9 @@ class PortfolioLimits:
 
         Args:
             max_drawdown_pct: Maximum portfolio drawdown (default from settings)
-            max_daily_loss_pct: Maximum daily loss percentage
+            max_daily_loss_pct: Maximum daily loss percentage (10% for day trading)
             max_positions: Maximum concurrent positions (default from settings)
+            max_daily_trades: Maximum trade entries per day (1 = cash account style)
             max_sector_exposure_pct: Maximum exposure to single sector
             max_correlation: Maximum correlation between positions
             warning_threshold_pct: Percentage of limit to trigger warning
@@ -119,6 +122,7 @@ class PortfolioLimits:
         self.max_drawdown_pct = max_drawdown_pct or settings.max_drawdown_pct
         self.max_daily_loss_pct = max_daily_loss_pct
         self.max_positions = max_positions or settings.max_positions
+        self.max_daily_trades = max_daily_trades
         self.max_sector_exposure_pct = max_sector_exposure_pct
         self.max_correlation = max_correlation
         self.warning_threshold = warning_threshold_pct
@@ -279,6 +283,45 @@ class PortfolioLimits:
                 limit_value=self.max_positions,
             )
 
+    def check_daily_trade_count(self) -> RiskCheck:
+        """
+        Check if daily trade limit allows new entries.
+
+        For day trading with a cash account approach, we limit
+        entries to max_daily_trades per day (typically 1).
+
+        Returns:
+            RiskCheck with status
+        """
+        trades_today = self._daily_stats.trades_entered_today
+
+        if trades_today >= self.max_daily_trades:
+            return RiskCheck(
+                passed=False,
+                status=RiskStatus.WARNING,
+                action=TradingAction.REDUCE_ONLY,
+                message=f"Daily trade limit reached: {trades_today}/{self.max_daily_trades}",
+                current_value=trades_today,
+                limit_value=self.max_daily_trades,
+            )
+        else:
+            return RiskCheck(
+                passed=True,
+                status=RiskStatus.OK,
+                action=TradingAction.ALLOW,
+                message=f"Daily trades: {trades_today}/{self.max_daily_trades}",
+                current_value=trades_today,
+                limit_value=self.max_daily_trades,
+            )
+
+    def record_entry(self) -> None:
+        """Record a new trade entry for daily trade counting."""
+        self._daily_stats.trades_entered_today += 1
+        logger.info(
+            f"Trade entry recorded: {self._daily_stats.trades_entered_today}"
+            f"/{self.max_daily_trades} trades today"
+        )
+
     def check_can_open_position(
         self,
         current_equity: float,
@@ -288,6 +331,7 @@ class PortfolioLimits:
         Comprehensive check if new position can be opened.
 
         Runs all relevant checks and returns the most restrictive result.
+        Includes daily trade limit check for day trading.
 
         Args:
             current_equity: Current account equity
@@ -315,6 +359,7 @@ class PortfolioLimits:
             self.check_drawdown(current_equity),
             self.check_daily_loss(),
             self.check_position_count(current_positions),
+            self.check_daily_trade_count(),
         ]
 
         # Find most restrictive result
@@ -383,6 +428,7 @@ class PortfolioLimits:
                     if self._daily_stats.trades_closed > 0
                     else 0
                 ),
+                "trades_entered_today": self._daily_stats.trades_entered_today,
             },
             "limits": {
                 "max_drawdown_pct": self.max_drawdown_pct,
