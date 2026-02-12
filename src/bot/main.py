@@ -13,7 +13,7 @@ Architecture:
 import asyncio
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from typing import Optional
 
 from loguru import logger
@@ -192,7 +192,10 @@ class TradingBot:
         logger.info("Starting momentum day trading bot (WSS mode)...")
         logger.info(f"  Mode: {self.config.trading_mode.value}")
         logger.info(f"  Feed: {get_settings().alpaca_data_feed}")
-        logger.info(f"  Window: {self.config.trading_window_start}-{self.config.trading_window_end} ET")
+        if self.config.full_day_trading:
+            logger.info(f"  Window: 9:30 AM - 3:55 PM ET (full day)")
+        else:
+            logger.info(f"  Window: {self.config.trading_window_start}-{self.config.trading_window_end} ET (early)")
         logger.info(f"  Max daily trades: {self.config.max_daily_trades}")
         logger.info(
             f"  Scanner: ${self.config.scanner_min_price}-${self.config.scanner_max_price}, "
@@ -205,6 +208,11 @@ class TradingBot:
 
         # 1. Initial sync with broker (REST, one-time)
         await self._sync_with_broker()
+
+        # 1b. Clear stale signals from previous sessions
+        stale_count = self.bot_state.clear_active_signals()
+        if stale_count:
+            logger.info(f"[STARTUP] Cleared {stale_count} stale signals from previous session")
 
         # 2. Initial scan (REST) to get watchlist
         await self._run_momentum_scan()
@@ -349,10 +357,17 @@ class TradingBot:
             )
             return
 
-        # Check if we're in any scanning window
-        if not self.scheduler.is_in_any_scan_window():
-            logger.debug("Outside scanning window")
-            return
+        # Don't enter new positions in the last 15 minutes before close (3:45 PM ET)
+        try:
+            import pytz
+            et = pytz.timezone("America/New_York")
+            now_et = datetime.now(et).time()
+            no_new_entries_after = dt_time(15, 45)
+            if now_et >= no_new_entries_after:
+                logger.debug(f"No new entries after 3:45 PM ET (currently {now_et.strftime('%H:%M')})")
+                return
+        except Exception:
+            pass
 
         # Get account info
         try:
@@ -374,7 +389,7 @@ class TradingBot:
                 preferred_min_price=self.config.scanner_preferred_min_price,
                 min_change_pct=self.config.scanner_min_change_pct,
                 min_relative_volume=self.config.scanner_min_relative_volume,
-                max_float_millions=self.config.scanner_max_float_millions,
+                min_float_millions=self.config.scanner_min_float_millions,
                 enable_float_filter=self.config.scanner_enable_float_filter,
                 top_n=self.config.scanner_top_n,
             )

@@ -615,7 +615,7 @@ class MomentumScreener:
         preferred_min_price: float = 2.0,
         min_change_pct: float = 10.0,
         min_relative_volume: float = 5.0,
-        max_float_millions: float = 20.0,
+        min_float_millions: float = 0.5,
         enable_float_filter: bool = True,
         top_n: int = 20,
         max_results: int = 5,
@@ -630,7 +630,7 @@ class MomentumScreener:
                 in sorting. $1-$2 stocks are included but ranked lower.
             min_change_pct: Minimum % gain today (10%)
             min_relative_volume: Minimum relative volume vs 20-day avg (5x)
-            max_float_millions: Maximum float in millions (20M)
+            min_float_millions: Minimum float in millions (0.5M floor for liquidity)
             enable_float_filter: Whether to filter by float
             top_n: Number of gainers to fetch from Alpaca
             max_results: Maximum candidates to return
@@ -697,7 +697,7 @@ class MomentumScreener:
         final = self._apply_filters(
             candidates,
             min_relative_volume=min_relative_volume,
-            max_float_millions=max_float_millions,
+            min_float_millions=min_float_millions,
             enable_float_filter=enable_float_filter,
         )
 
@@ -998,18 +998,18 @@ class MomentumScreener:
         self,
         candidates: list[MomentumCandidate],
         min_relative_volume: float = 5.0,
-        max_float_millions: float = 20.0,
+        min_float_millions: float = 0.5,
         enable_float_filter: bool = True,
     ) -> list[MomentumCandidate]:
         """
-        Apply the remaining filters (relative volume, float).
+        Apply the remaining filters (relative volume, float floor).
 
         Candidates that partially pass are still included but marked.
 
         Args:
             candidates: Enriched candidates
             min_relative_volume: Minimum relative volume threshold
-            max_float_millions: Maximum float in millions
+            min_float_millions: Minimum float in millions (liquidity floor)
             enable_float_filter: Whether to apply float filter
 
         Returns:
@@ -1024,11 +1024,11 @@ class MomentumScreener:
             if c.relative_volume is not None and c.relative_volume < min_relative_volume:
                 failures.append(f"relVol={c.relative_volume:.1f}x < {min_relative_volume}x")
 
-            # Float filter
+            # Float floor filter (reject micro-floats with too little liquidity)
             if enable_float_filter and c.float_shares is not None:
                 float_m = c.float_shares / 1_000_000
-                if float_m > max_float_millions:
-                    failures.append(f"float={float_m:.1f}M > {max_float_millions}M")
+                if float_m < min_float_millions:
+                    failures.append(f"float={float_m:.2f}M < {min_float_millions}M min")
 
             c.filter_failures = failures
             c.passes_all_filters = len(failures) == 0
@@ -1039,7 +1039,7 @@ class MomentumScreener:
             float_passes = (
                 not enable_float_filter
                 or c.float_shares is None  # Missing data = lenient
-                or (c.float_shares / 1_000_000) <= max_float_millions
+                or (c.float_shares / 1_000_000) >= min_float_millions
             )
 
             if rv_passes and float_passes:

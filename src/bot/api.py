@@ -115,7 +115,8 @@ async def get_status() -> dict:
             "trades_today": _bot._daily_trades_today,
             "max_daily_trades": _bot.config.max_daily_trades,
             "scanner_hits": len(_bot._scanner_results),
-            "trading_window": f"{_bot.config.trading_window_start}-{_bot.config.trading_window_end} ET",
+            "full_day_trading": _bot.config.full_day_trading,
+            "trading_window": "9:30-15:55 ET" if _bot.config.full_day_trading else f"{_bot.config.trading_window_start}-{_bot.config.trading_window_end} ET",
             "last_sync": last_sync,
             "timestamp": datetime.now().isoformat(),
             # WebSocket streaming status
@@ -457,6 +458,34 @@ async def tradingview_webhook(payload: WebhookPayload) -> dict:
     }
 
 
+@app.post("/api/scan/trigger")
+async def trigger_scan() -> dict:
+    """Manually trigger a momentum scan."""
+    if not _bot:
+        return {"error": "Bot not initialized"}
+
+    from loguru import logger
+    logger.info("[API] Manual scan triggered")
+    await _bot._run_momentum_scan()
+    results = [c.to_dict() for c in _bot._scanner_results] if _bot._scanner_results else []
+    return {"status": "ok", "candidates": len(results), "results": results}
+
+
+@app.post("/api/settings/full-day-trading")
+async def toggle_full_day_trading(enabled: bool = True) -> dict:
+    """Toggle between early window (7-10 AM) and full day (9:30 AM - 3:55 PM) trading."""
+    if not _bot:
+        return {"error": "Bot not initialized"}
+
+    _bot.scheduler.set_full_day_trading(enabled)
+    window = "9:30 AM - 3:55 PM ET" if enabled else f"{_bot.config.trading_window_start}-{_bot.config.trading_window_end} ET"
+    return {
+        "status": "ok",
+        "full_day_trading": enabled,
+        "trading_window": window,
+    }
+
+
 @app.get("/api/asset/{symbol}")
 async def get_asset_info(symbol: str) -> dict:
     """Get asset name and details from Alpaca."""
@@ -722,6 +751,53 @@ DASHBOARD_HTML = """
             margin-top: 20px;
             text-align: center;
         }
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 6px;
+        }
+        .toggle-label {
+            color: #8b949e;
+            font-size: 12px;
+        }
+        .toggle-switch {
+            position: relative;
+            width: 36px;
+            height: 20px;
+            flex-shrink: 0;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            inset: 0;
+            background: #30363d;
+            border-radius: 20px;
+            transition: 0.2s;
+        }
+        .toggle-slider:before {
+            content: "";
+            position: absolute;
+            height: 14px;
+            width: 14px;
+            left: 3px;
+            bottom: 3px;
+            background: #8b949e;
+            border-radius: 50%;
+            transition: 0.2s;
+        }
+        .toggle-switch input:checked + .toggle-slider {
+            background: #238636;
+        }
+        .toggle-switch input:checked + .toggle-slider:before {
+            transform: translateX(16px);
+            background: #fff;
+        }
     </style>
 </head>
 <body>
@@ -733,6 +809,13 @@ DASHBOARD_HTML = """
                 <div class="card-title">Status</div>
                 <div class="card-value" id="status">Loading...</div>
                 <div class="card-subtitle" id="trading-window">--</div>
+                <div class="toggle-row">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="full-day-toggle" onchange="toggleFullDay(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span class="toggle-label">Full day trading</span>
+                </div>
             </div>
             <div class="card">
                 <div class="card-title">Progress to $4,000</div>
@@ -974,6 +1057,12 @@ DASHBOARD_HTML = """
                     windowEl.innerHTML = `<span class="neutral">Closed</span> ${tradingWindow}`;
                 }
 
+                // Sync full day toggle with server state
+                const fullDayToggle = document.getElementById('full-day-toggle');
+                if (fullDayToggle && !fullDayToggle._userClicked) {
+                    fullDayToggle.checked = !!status.full_day_trading;
+                }
+
                 // Positions (clickable to show chart)
                 const posTable = document.getElementById('positions-table');
                 if (positions.length === 0) {
@@ -1101,6 +1190,22 @@ DASHBOARD_HTML = """
         let currentChartSymbol = null;
         let currentWatchlist = null; // 'stocks' or 'crypto'
         let currentSymbolIndex = -1;
+
+        async function toggleFullDay(enabled) {
+            const toggle = document.getElementById('full-day-toggle');
+            toggle._userClicked = true;
+            try {
+                const resp = await fetch(`api/settings/full-day-trading?enabled=${enabled}`, { method: 'POST' });
+                const data = await resp.json();
+                if (data.error) {
+                    toggle.checked = !enabled;
+                }
+            } catch (e) {
+                toggle.checked = !enabled;
+            }
+            // Let next fetchData cycle pick up the new state
+            setTimeout(() => { toggle._userClicked = false; fetchData(); }, 500);
+        }
 
         async function showChart(symbol) {
             document.getElementById('chart-modal').classList.add('active');

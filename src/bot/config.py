@@ -71,6 +71,10 @@ class BotConfig(Settings):
         default="10:00",
         description="End of active trading window (ET, HH:MM)",
     )
+    full_day_trading: bool = Field(
+        default=False,
+        description="If True, trade the full market day (9:30 AM - 3:55 PM ET) instead of the early window",
+    )
 
     # ── Momentum Scanner Settings ───────────────────────────────────────
     # Ross Cameron's 5 pillars: price, float, relative volume, change%, catalyst
@@ -88,10 +92,10 @@ class BotConfig(Settings):
         description="Preferred minimum price — stocks above this get priority weighting",
     )
     scanner_max_price: float = Field(
-        default=10.0,
+        default=10000.0,
         ge=2.0,
-        le=50.0,
-        description="Maximum stock price for scanner ($10 sweet spot)",
+        le=10000.0,
+        description="Maximum stock price for scanner (no practical ceiling with fractional shares)",
     )
     scanner_min_change_pct: float = Field(
         default=10.0,
@@ -105,11 +109,11 @@ class BotConfig(Settings):
         le=20.0,
         description="Minimum relative volume (today vs 20-day avg, 5x = strong interest)",
     )
-    scanner_max_float_millions: float = Field(
-        default=20.0,
-        ge=1.0,
-        le=100.0,
-        description="Maximum float in millions (low supply = bigger moves)",
+    scanner_min_float_millions: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=50.0,
+        description="Minimum float in millions (enough liquidity to avoid slippage)",
     )
     scanner_enable_float_filter: bool = Field(
         default=True,

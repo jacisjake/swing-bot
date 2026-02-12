@@ -74,8 +74,14 @@ class BotScheduler:
 
         # Parse trading window times from config
         self._premarket_start = self._parse_time(config.premarket_scan_start)
-        self._window_start = self._parse_time(config.trading_window_start)
-        self._window_end = self._parse_time(config.trading_window_end)
+        if config.full_day_trading:
+            # Full day: scan from premarket start, trade 9:30 AM - 3:55 PM ET
+            self._window_start = time(9, 30)
+            self._window_end = time(15, 55)
+            logger.info("[SCHEDULER] Full day trading mode: 9:30 AM - 3:55 PM ET")
+        else:
+            self._window_start = self._parse_time(config.trading_window_start)
+            self._window_end = self._parse_time(config.trading_window_end)
 
     @staticmethod
     def _parse_time(time_str: str) -> time:
@@ -115,25 +121,34 @@ class BotScheduler:
         win_end_h = self._window_end.hour
         win_end_m = self._window_end.minute
 
-        # ── 0. Press release scan: 4:00-6:59 AM ET, every 5 minutes ──────
+        # ── 0. Press release scan: 4 AM + 9:15 AM ET ─────────────────────
+        # Two scans: overnight PRs at 4 AM, last-minute earnings at 9:15 AM
         if self._press_release_scan_callback:
             pr_start = self._parse_time(self.config.press_release_scan_start)
-            pr_interval = self.config.press_release_scan_interval_minutes
-
-            # Run from press_release_scan_start until trading window starts
-            # e.g., 4:00-6:59 AM ET
-            pr_hours = f"{pr_start.hour}-{win_start_h - 1}" if win_start_h > pr_start.hour else str(pr_start.hour)
 
             self.scheduler.add_job(
                 self._run_press_release_scan,
                 CronTrigger(
                     day_of_week="mon-fri",
-                    hour=pr_hours,
-                    minute=f"*/{pr_interval}",
+                    hour=str(pr_start.hour),
+                    minute=str(pr_start.minute),
                     timezone="America/New_York",
                 ),
-                id="press_release_scan",
-                name="Press Release Catalyst Scan",
+                id="press_release_scan_early",
+                name="Press Release Scan (4 AM)",
+                replace_existing=True,
+            )
+
+            self.scheduler.add_job(
+                self._run_press_release_scan,
+                CronTrigger(
+                    day_of_week="mon-fri",
+                    hour="9",
+                    minute="15",
+                    timezone="America/New_York",
+                ),
+                id="press_release_scan_preopen",
+                name="Press Release Scan (9:15 AM)",
                 replace_existing=True,
             )
 
@@ -451,6 +466,24 @@ class BotScheduler:
                 await self._daily_reset_callback()
             except Exception as e:
                 logger.error(f"Daily reset error: {e}")
+
+    def set_full_day_trading(self, enabled: bool) -> None:
+        """Switch between early window and full day trading at runtime."""
+        self.config.full_day_trading = enabled
+        if enabled:
+            self._window_start = time(9, 30)
+            self._window_end = time(15, 55)
+            logger.info("[SCHEDULER] Switched to full day trading: 9:30 AM - 3:55 PM ET")
+        else:
+            self._window_start = self._parse_time(self.config.trading_window_start)
+            self._window_end = self._parse_time(self.config.trading_window_end)
+            logger.info(
+                f"[SCHEDULER] Switched to early window: "
+                f"{self.config.trading_window_start}-{self.config.trading_window_end} ET"
+            )
+        # Reschedule jobs with new window
+        if self._is_running:
+            self.setup_jobs()
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
