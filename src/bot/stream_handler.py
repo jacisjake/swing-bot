@@ -111,6 +111,11 @@ class StreamHandler:
         # Track which 5-min buckets we've already processed
         self._last_processed_bucket: dict[str, int] = {}
 
+        # Exit cooldown: symbol -> timestamp of last exit attempt
+        # Prevents hammering the API on every quote tick when exits fail
+        self._exit_cooldown: dict[str, float] = {}
+        self._exit_cooldown_seconds = 30  # Wait 30s between exit retries
+
     # ── Bar Handling ───────────────────────────────────────────────────
 
     async def on_bar(self, bar: dict) -> None:
@@ -215,6 +220,9 @@ class StreamHandler:
         # Run signal generation
         await self._check_signal(symbol)
 
+        # Check strategy exit for open position (MACD exhaustion, etc.)
+        await self._check_strategy_exit(symbol)
+
     async def _check_signal(self, symbol: str) -> None:
         """
         Run signal generation for a symbol using accumulated 5-min bars.
@@ -276,6 +284,55 @@ class StreamHandler:
 
             # Process through risk checks and execute
             await self._process_signal(gen_signal)
+
+    async def _check_strategy_exit(self, symbol: str) -> None:
+        """
+        Check if an open position should exit based on strategy signals.
+
+        Called on every 5-min bar close. Uses locally buffered bars
+        (no REST call) to check MACD exhaustion and histogram fading.
+        """
+        position = self.position_manager.get_position(symbol)
+        if position is None:
+            return
+
+        bars_df = self._five_min_bars.get(symbol)
+        if bars_df is None or len(bars_df) < 40:
+            return
+
+        direction = (
+            SignalDirection.LONG
+            if position.side == PositionSide.LONG
+            else SignalDirection.SHORT
+        )
+
+        try:
+            should_exit, reason = self.strategy.should_exit(
+                symbol=symbol,
+                bars=bars_df,
+                entry_price=position.entry_price,
+                direction=direction,
+                current_price=position.current_price,
+            )
+        except Exception as e:
+            logger.debug(f"[STREAM] {symbol}: strategy exit check error: {e}")
+            return
+
+        if not should_exit:
+            return
+
+        exit_reason = f"Strategy exit: {reason}"
+        logger.info(f"[STREAM STRATEGY EXIT] {symbol}: {exit_reason}")
+
+        exec_result = await self.executor.execute_exit(
+            symbol=symbol,
+            reason=exit_reason,
+        )
+        if exec_result.success:
+            pnl = exec_result.position.realized_pnl if exec_result.position else 0
+            logger.info(f"  Closed {symbol}: P&L ${pnl:.2f}")
+        else:
+            logger.error(f"  Failed to close {symbol}: {exec_result.error}")
 
     async def _process_signal(self, signal: Signal) -> None:
         """Process signal through risk checks and execute if valid."""
@@ -376,9 +433,16 @@ class StreamHandler:
         # Update position price
         position.update_price(price)
 
+        # Check exit cooldown (don't hammer API if previous exit failed)
+        import time as _time
+        last_attempt = self._exit_cooldown.get(symbol, 0)
+        if _time.time() - last_attempt < self._exit_cooldown_seconds:
+            return
+
         # Quick exit checks (stops/targets/trailing — no expensive strategy check)
         exit_signal = await self.monitor.check_position_at_price(symbol, price)
         if exit_signal:
+            self._exit_cooldown[symbol] = _time.time()
             logger.info(f"[STREAM EXIT] {symbol}: {exit_signal.reason}")
             exec_result = await self.executor.execute_exit(
                 symbol=symbol,
@@ -387,8 +451,9 @@ class StreamHandler:
             if exec_result.success:
                 pnl = exec_result.position.realized_pnl if exec_result.position else 0
                 logger.info(f"  Closed {symbol}: P&L ${pnl:.2f}")
+                self._exit_cooldown.pop(symbol, None)  # Clear cooldown on success
             else:
-                logger.error(f"  Failed to close {symbol}: {exec_result.error}")
+                logger.error(f"  Failed to close {symbol}: {exec_result.error} (retry in {self._exit_cooldown_seconds}s)")
 
     # ── Trade Update Handling ──────────────────────────────────────────
 

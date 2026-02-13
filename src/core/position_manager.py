@@ -34,8 +34,32 @@ class Position:
     entry_price: float
     entry_time: datetime
     stop_loss: Optional[float] = None
+    initial_stop_loss: Optional[float] = None  # Immutable record of original stop
     take_profit: Optional[float] = None
     trailing_stop_pct: Optional[float] = None
+
+    def __post_init__(self):
+        """Set initial_stop_loss from stop_loss if not explicitly provided."""
+        if self.initial_stop_loss is None and self.stop_loss is not None:
+            self.initial_stop_loss = self.stop_loss
+
+    @property
+    def initial_risk(self) -> float:
+        """Calculate 1R (initial risk per share). Returns 0 if no stop was set."""
+        if self.initial_stop_loss is None:
+            return 0.0
+        return abs(self.entry_price - self.initial_stop_loss)
+
+    @property
+    def current_r_multiple(self) -> float:
+        """Calculate current profit as a multiple of initial risk (R)."""
+        ir = self.initial_risk
+        if ir == 0:
+            return 0.0
+        if self.side == PositionSide.LONG:
+            return (self.current_price - self.entry_price) / ir
+        else:
+            return (self.entry_price - self.current_price) / ir
 
     # Updated as position evolves
     current_price: float = 0.0
@@ -169,6 +193,7 @@ class Position:
             "entry_price": self.entry_price,
             "entry_time": self.entry_time.isoformat(),
             "stop_loss": self.stop_loss,
+            "initial_stop_loss": self.initial_stop_loss,
             "take_profit": self.take_profit,
             "trailing_stop_pct": self.trailing_stop_pct,
             "current_price": self.current_price,

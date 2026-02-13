@@ -193,6 +193,8 @@ class TradingBot:
         logger.info(f"  Mode: {self.config.trading_mode.value}")
         logger.info(f"  Feed: {get_settings().alpaca_data_feed}")
         if self.config.full_day_trading:
+            from datetime import time as dt_time
+            self.monitor._window_end = dt_time(15, 55)
             logger.info(f"  Window: 9:30 AM - 3:55 PM ET (full day)")
         else:
             logger.info(f"  Window: {self.config.trading_window_start}-{self.config.trading_window_end} ET (early)")
@@ -712,8 +714,9 @@ class TradingBot:
                 # Fallback: percentage-based stops for day trading
                 stop_pct = 0.05
                 position.stop_loss = position.entry_price * (1 - stop_pct)
-                position.take_profit = position.entry_price * (1 + stop_pct * 2)
-                position.trailing_stop_pct = stop_pct
+                position.initial_stop_loss = position.stop_loss
+                position.take_profit = position.entry_price * (1 + stop_pct * self.config.risk_reward_target)
+                position.trailing_stop_pct = None
                 logger.info(f"  Added default stops for {symbol} (5% fallback)")
                 return
 
@@ -724,16 +727,20 @@ class TradingBot:
             stop_mult = self.config.stock_atr_stop_multiplier
 
             # Calculate stop and target (LONG only for momentum strategy)
+            rr_target = self.config.risk_reward_target  # 10R safety ceiling
             from src.core.position_manager import PositionSide
             if position.side == PositionSide.LONG:
                 position.stop_loss = position.entry_price - (atr_value * stop_mult)
-                position.take_profit = position.entry_price + (atr_value * stop_mult * 2)
+                position.take_profit = position.entry_price + (atr_value * stop_mult * rr_target)
             else:
                 position.stop_loss = position.entry_price + (atr_value * stop_mult)
-                position.take_profit = position.entry_price - (atr_value * stop_mult * 2)
+                position.take_profit = position.entry_price - (atr_value * stop_mult * rr_target)
 
-            # Trailing stop
-            position.trailing_stop_pct = (atr_value * stop_mult) / position.entry_price
+            # Set initial_stop_loss for R-based trailing
+            position.initial_stop_loss = position.stop_loss
+
+            # Progressive R-based trailing handles exits now (no % trailing)
+            position.trailing_stop_pct = None
 
             logger.info(
                 f"  Added ATR stops for {symbol}: "

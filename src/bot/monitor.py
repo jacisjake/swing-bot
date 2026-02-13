@@ -164,7 +164,7 @@ class PositionMonitor:
             )
 
         # Breakeven stop adjustment
-        self._check_breakeven_stop(position)
+        self._adjust_progressive_trail(position)
 
         # Stop-loss
         if position.should_stop_loss():
@@ -225,7 +225,7 @@ class PositionMonitor:
             )
 
         # Check and apply breakeven stop after 1R profit
-        self._check_breakeven_stop(position)
+        self._adjust_progressive_trail(position)
 
         # Check stop-loss first (highest priority)
         if position.should_stop_loss():
@@ -272,47 +272,56 @@ class PositionMonitor:
 
         return None
 
-    def _check_breakeven_stop(self, position: Position) -> None:
+    def _adjust_progressive_trail(self, position: Position) -> None:
         """
-        Move stop to breakeven after 1R profit is reached.
+        Progressive R-based trailing stop.
 
-        1R = initial risk (distance from entry to original stop)
-        When profit >= 1R, move stop_loss to entry_price
+        From MACD_BOT_PROMPT.md exit rules:
+        - At 1R profit: move stop to breakeven (entry price)
+        - For each additional 0.5R: trail stop up by 0.25R
 
-        Args:
-            position: Position to check
+        Examples (LONG, entry=$5.00, initial stop=$4.70, 1R=$0.30):
+          Price $5.30 (1.0R) -> stop = $5.00 (breakeven)
+          Price $5.45 (1.5R) -> stop = $5.075 (+0.25R)
+          Price $5.60 (2.0R) -> stop = $5.15 (+0.50R)
+          Price $5.75 (2.5R) -> stop = $5.225 (+0.75R)
+          Price $5.90 (3.0R) -> stop = $5.30 (+1.00R)
+
+        Stop only ratchets up (for longs), never down.
         """
-        if position.stop_loss is None:
+        if position.stop_loss is None or position.initial_stop_loss is None:
             return
 
-        # Calculate initial risk (1R)
-        initial_risk = abs(position.entry_price - position.stop_loss)
+        initial_risk = position.initial_risk
         if initial_risk == 0:
             return
 
-        # Calculate current profit
-        if position.side == PositionSide.LONG:
-            current_profit = position.current_price - position.entry_price
-            profit_in_r = current_profit / initial_risk
+        r_multiple = position.current_r_multiple
 
-            # Move to breakeven after 1R profit
-            if profit_in_r >= 1.0 and position.stop_loss < position.entry_price:
+        if r_multiple < 1.0:
+            return
+
+        # steps_above_1r = floor((r - 1.0) / 0.5), trail = steps * 0.25R
+        steps_above_1r = int((r_multiple - 1.0) / 0.5)
+        trail_r = steps_above_1r * 0.25
+
+        if position.side == PositionSide.LONG:
+            new_stop = round(position.entry_price + (trail_r * initial_risk), 2)
+            if new_stop > position.stop_loss:
                 old_stop = position.stop_loss
-                position.stop_loss = position.entry_price
+                position.stop_loss = new_stop
                 logger.info(
-                    f"[BREAKEVEN] {position.symbol}: Moved stop to breakeven "
-                    f"@ ${position.entry_price:.2f} (was ${old_stop:.2f}, profit={profit_in_r:.1f}R)"
+                    f"[TRAIL] {position.symbol}: Stop raised ${old_stop:.2f} -> "
+                    f"${new_stop:.2f} (profit={r_multiple:.1f}R, trail=+{trail_r:.2f}R)"
                 )
         else:  # SHORT
-            current_profit = position.entry_price - position.current_price
-            profit_in_r = current_profit / initial_risk
-
-            if profit_in_r >= 1.0 and position.stop_loss > position.entry_price:
+            new_stop = round(position.entry_price - (trail_r * initial_risk), 2)
+            if new_stop < position.stop_loss:
                 old_stop = position.stop_loss
-                position.stop_loss = position.entry_price
+                position.stop_loss = new_stop
                 logger.info(
-                    f"[BREAKEVEN] {position.symbol}: Moved stop to breakeven "
-                    f"@ ${position.entry_price:.2f} (was ${old_stop:.2f}, profit={profit_in_r:.1f}R)"
+                    f"[TRAIL] {position.symbol}: Stop lowered ${old_stop:.2f} -> "
+                    f"${new_stop:.2f} (profit={r_multiple:.1f}R, trail=-{trail_r:.2f}R)"
                 )
 
     def _is_past_trading_window(self) -> bool:

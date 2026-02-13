@@ -117,13 +117,9 @@ class TradeExecutor:
                 else PositionSide.SHORT
             )
 
-            # Calculate trailing stop percentage from ATR if stop_price is set
+            # Progressive R-based trailing stop handles trailing now.
+            # Disable the old percentage-based trailing stop to avoid conflicts.
             trailing_stop_pct = None
-            if trade_params.stop_price:
-                stop_distance = order_result.filled_price - trade_params.stop_price
-                if stop_distance > 0:
-                    # Use 75% of stop distance for trailing (tighter than initial stop)
-                    trailing_stop_pct = (stop_distance * 0.75) / order_result.filled_price
 
             position = self.position_manager.open_position(
                 symbol=symbol,

@@ -478,6 +478,15 @@ async def toggle_full_day_trading(enabled: bool = True) -> dict:
         return {"error": "Bot not initialized"}
 
     _bot.scheduler.set_full_day_trading(enabled)
+
+    # Update monitor's time-based exit window to match
+    from datetime import time as dt_time
+    if enabled:
+        _bot.monitor._window_end = dt_time(15, 55)
+    else:
+        parts = _bot.config.trading_window_end.split(":")
+        _bot.monitor._window_end = dt_time(int(parts[0]), int(parts[1]))
+
     window = "9:30 AM - 3:55 PM ET" if enabled else f"{_bot.config.trading_window_start}-{_bot.config.trading_window_end} ET"
     return {
         "status": "ok",
@@ -973,6 +982,9 @@ DASHBOARD_HTML = """
                 currentWatchlistData.stocks = watchlists.stocks || [];
                 currentWatchlistData.crypto = watchlists.crypto || [];
 
+                // Store positions globally for chart entry price markers
+                currentPositionsData = positions;
+
                 // Status
                 const statusEl = document.getElementById('status');
                 const dot = status.running ? 'running' : 'stopped';
@@ -1187,6 +1199,7 @@ DASHBOARD_HTML = """
         let candleChart = null;
         let macdChart = null;
         let currentWatchlistData = { stocks: [], crypto: [] };
+        let currentPositionsData = [];
         let currentChartSymbol = null;
         let currentWatchlist = null; // 'stocks' or 'crypto'
         let currentSymbolIndex = -1;
@@ -1262,6 +1275,19 @@ DASHBOARD_HTML = """
                     wickUpColor: '#3fb950', wickDownColor: '#f85149',
                 });
                 candleSeries.setData(data.candles);
+
+                // Mark entry price for open positions
+                const pos = currentPositionsData.find(p => p.symbol === symbol);
+                if (pos && pos.entry_price) {
+                    candleSeries.createPriceLine({
+                        price: pos.entry_price,
+                        color: '#58a6ff',
+                        lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dashed,
+                        axisLabelVisible: true,
+                        title: `Entry $${pos.entry_price.toFixed(2)}`,
+                    });
+                }
 
                 // Create MACD chart
                 macdChart = LightweightCharts.createChart(document.getElementById('macd-container'), {

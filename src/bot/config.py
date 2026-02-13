@@ -201,10 +201,10 @@ class BotConfig(Settings):
         description="Entry timeframe for signals (5-min bars for day trading)",
     )
     stock_atr_stop_multiplier: float = Field(
-        default=1.5,
+        default=1.0,
         ge=0.5,
         le=4.0,
-        description="ATR multiplier for stop-loss (tighter for day trading)",
+        description="ATR multiplier for stop-loss (tight = cut losers fast)",
     )
     atr_period: int = Field(
         default=14,
@@ -234,10 +234,10 @@ class BotConfig(Settings):
         description="Maximum pullback retracement of surge (65% for volatile low-float stocks)",
     )
     risk_reward_target: float = Field(
-        default=2.0,
+        default=10.0,
         ge=1.0,
-        le=5.0,
-        description="Risk/reward ratio for take-profit target",
+        le=20.0,
+        description="Take-profit safety ceiling (progressive trailing stop handles actual exits)",
     )
 
     # ── Signal Filtering ────────────────────────────────────────────────
