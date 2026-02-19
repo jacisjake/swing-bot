@@ -1,19 +1,17 @@
 """
-Event-driven signal engine for WebSocket streaming.
+Event-driven signal engine for DXLink streaming.
 
 Replaces the polling-based _run_momentum_scan() and _monitor_positions()
 with real-time callbacks triggered by streaming bar/quote data.
 
 Data flow:
 1. Scanner (REST, every 2 min) finds candidates → update_watchlist()
-2. WSS 1-min bars arrive → aggregate to 5-min → run strategy → execute
-3. WSS quotes arrive → check position exits (stops/targets/trailing)
-4. WSS trade updates → update position state on fills/cancels
-5. WSS news → flag catalysts on watchlist symbols
+2. DXLink native 5-min candles arrive → run strategy → execute
+3. DXLink quotes arrive → check position exits (stops/targets/trailing)
+4. REST polling detects order fills → update position state
 """
 
 import asyncio
-from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING
 
@@ -29,9 +27,9 @@ if TYPE_CHECKING:
     from src.bot.processor import SignalProcessor
     from src.bot.signals.base import SignalGenerator
     from src.bot.state.persistence import BotState
-    from src.core.alpaca_client import AlpacaClient
+    from src.core.tastytrade_client import TastytradeClient
     from src.core.position_manager import PositionManager
-    from src.core.ws_client import AlpacaWSClient
+    from src.core.tastytrade_ws import TastytradeWSClient
     from src.risk.portfolio_limits import PortfolioLimits
 
 
@@ -40,10 +38,9 @@ class StreamHandler:
     Processes streaming market data into trading signals.
 
     Replaces polling with event-driven approach:
-    - on_bar: 1-min bars → aggregate to 5-min → signal generation
+    - on_bar: native 5-min candles from DXLink → signal generation
     - on_quote: real-time prices → instant exit checks
     - on_trade_update: order fills → position state updates
-    - on_news: catalyst flagging
     """
 
     def __init__(
@@ -55,8 +52,8 @@ class StreamHandler:
         position_manager: "PositionManager",
         portfolio_limits: "PortfolioLimits",
         bot_state: "BotState",
-        client: "AlpacaClient",
-        ws_client: "AlpacaWSClient",
+        client: "TastytradeClient",
+        ws_client: "TastytradeWSClient",
         config,
     ):
         """
@@ -71,7 +68,7 @@ class StreamHandler:
             portfolio_limits: Risk limits
             bot_state: Bot state persistence
             client: REST client for backfill and account data
-            ws_client: WebSocket client for subscription management
+            ws_client: DXLink client for subscription management
             config: BotConfig
         """
         self.strategy = strategy
@@ -85,11 +82,8 @@ class StreamHandler:
         self.ws_client = ws_client
         self.config = config
 
-        # 1-min bar buffer: symbol -> list of bar dicts
-        self._bar_buffer: dict[str, list[dict]] = defaultdict(list)
-
         # Rolling 5-min bar history: symbol -> DataFrame
-        # Seeded with backfill on subscribe, updated on each 5-min aggregation
+        # Seeded with backfill on subscribe, updated on each native 5-min candle
         self._five_min_bars: dict[str, pd.DataFrame] = {}
 
         # Latest quotes: symbol -> {bid, ask, price, timestamp}
@@ -98,7 +92,7 @@ class StreamHandler:
         # Current watchlist (symbols we're streaming)
         self._watchlist: list[str] = []
 
-        # Catalyst tracking (from news stream)
+        # Catalyst tracking (from press release scanner)
         self._catalysts: dict[str, dict] = {}  # symbol -> {headline, source, time}
 
         # Day trading state (shared with TradingBot)
@@ -107,9 +101,6 @@ class StreamHandler:
 
         # Prevent concurrent signal processing
         self._processing_lock = asyncio.Lock()
-
-        # Track which 5-min buckets we've already processed
-        self._last_processed_bucket: dict[str, int] = {}
 
         # Exit cooldown: symbol -> timestamp of last exit attempt
         # Prevents hammering the API on every quote tick when exits fail
@@ -120,14 +111,13 @@ class StreamHandler:
 
     async def on_bar(self, bar: dict) -> None:
         """
-        Handle incoming 1-min bar from WebSocket.
+        Handle incoming native 5-min candle from DXLink.
 
-        Aggregates 1-min bars into 5-min bars, then runs signal generation
-        when a 5-min candle closes.
+        DXLink sends 5-min candles directly — no aggregation needed.
 
-        Bar format from Alpaca:
+        Bar format (normalized by TastytradeWSClient):
         {"T": "b", "S": "AAPL", "o": 150.25, "h": 150.75, "l": 150.10,
-         "c": 150.50, "v": 125000, "t": "2026-02-10T14:35:00Z", "n": 50, "vw": 150.40}
+         "c": 150.50, "v": 125000, "t": "2026-02-10T14:35:00+00:00", "n": 0, "vw": 150.40}
         """
         symbol = bar.get("S")
         if not symbol:
@@ -140,59 +130,13 @@ class StreamHandler:
         except (ValueError, AttributeError):
             bar_time = datetime.now(timezone.utc)
 
-        # Store the 1-min bar
-        bar_entry = {
+        five_min_bar = {
             "open": float(bar.get("o", 0)),
             "high": float(bar.get("h", 0)),
             "low": float(bar.get("l", 0)),
             "close": float(bar.get("c", 0)),
             "volume": int(bar.get("v", 0)),
-            "timestamp": bar_time,
             "vwap": float(bar.get("vw", 0)),
-        }
-        self._bar_buffer[symbol].append(bar_entry)
-
-        # Keep buffer reasonable (last 30 bars = 30 minutes of 1-min data)
-        if len(self._bar_buffer[symbol]) > 30:
-            self._bar_buffer[symbol] = self._bar_buffer[symbol][-30:]
-
-        # Determine 5-min bucket: minute 0-4 → bucket 0, 5-9 → bucket 5, etc.
-        bucket = bar_time.minute // 5 * 5
-        bucket_key = bar_time.hour * 100 + bucket  # e.g., 935 for 9:35
-
-        # Check if this bar completes a new 5-min candle
-        # A 5-min bar closes when we see minute X where X % 5 == 4
-        # (minute 4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59)
-        if bar_time.minute % 5 == 4:
-            # Check if we already processed this bucket
-            last_bucket = self._last_processed_bucket.get(symbol, -1)
-            if bucket_key != last_bucket:
-                self._last_processed_bucket[symbol] = bucket_key
-                await self._on_five_min_close(symbol, bar_time)
-
-    async def _on_five_min_close(self, symbol: str, bar_time: datetime) -> None:
-        """
-        Handle 5-min candle close. Aggregate 1-min bars and run strategy.
-
-        Args:
-            symbol: Stock ticker
-            bar_time: Timestamp of the closing 1-min bar
-        """
-        # Aggregate last 5 (or fewer) 1-min bars into one 5-min bar
-        recent_bars = self._bar_buffer.get(symbol, [])
-        if not recent_bars:
-            return
-
-        # Take the last 5 bars (or however many we have)
-        bars_to_aggregate = recent_bars[-5:]
-
-        five_min_bar = {
-            "open": bars_to_aggregate[0]["open"],
-            "high": max(b["high"] for b in bars_to_aggregate),
-            "low": min(b["low"] for b in bars_to_aggregate),
-            "close": bars_to_aggregate[-1]["close"],
-            "volume": sum(b["volume"] for b in bars_to_aggregate),
-            "vwap": bars_to_aggregate[-1]["vwap"],
         }
 
         # Append to rolling 5-min DataFrame
@@ -340,6 +284,7 @@ class StreamHandler:
             account = self.client.get_account()
             equity = float(account.get("equity", 0))
             buying_power = float(account.get("buying_power", 0))
+            daytrade_count = int(account.get("daytrade_count", 0))
         except Exception as e:
             logger.error(f"[STREAM] Failed to get account info: {e}")
             return
@@ -351,6 +296,7 @@ class StreamHandler:
             account_equity=equity,
             buying_power=buying_power,
             current_positions=current_positions,
+            daytrade_count=daytrade_count,
         )
 
         if not result.passed:
@@ -497,45 +443,14 @@ class StreamHandler:
         else:
             logger.debug(f"[WS EVENT] {symbol}: {event}")
 
-    # ── News Handling ──────────────────────────────────────────────────
-
-    async def on_news(self, article: dict) -> None:
-        """
-        Handle real-time news article from news stream.
-
-        News format:
-        {"T": "n", "id": 123, "headline": "...", "source": "...",
-         "symbols": ["AAPL"], "created_at": "...", "url": "..."}
-        """
-        symbols = article.get("symbols", [])
-        headline = article.get("headline", "")
-        source = article.get("source", "")
-
-        for symbol in symbols:
-            if symbol in self._watchlist:
-                existing = self._catalysts.get(symbol, {})
-                count = existing.get("count", 0) + 1
-
-                self._catalysts[symbol] = {
-                    "headline": headline,
-                    "source": source,
-                    "count": count,
-                    "time": datetime.now().isoformat(),
-                }
-
-                logger.info(
-                    f"[STREAM NEWS] {symbol}: {headline[:80]}... "
-                    f"(source={source}, total={count})"
-                )
-
     # ── Watchlist Management ───────────────────────────────────────────
 
     async def update_watchlist(self, symbols: list[str]) -> None:
         """
-        Update WebSocket subscriptions when scanner finds new candidates.
+        Update DXLink subscriptions when scanner finds new candidates.
 
         1. Unsubscribes from removed symbols
-        2. Subscribes to new symbols (1-min bars + quotes)
+        2. Subscribes to new symbols (5-min bars + quotes)
         3. Backfills 5-min bar history for new symbols
         4. Always subscribes to quotes for open position symbols
         """
@@ -561,9 +476,7 @@ class StreamHandler:
         removed = old_symbols - new_symbols
         for symbol in removed:
             if symbol not in pos_symbols:
-                self._bar_buffer.pop(symbol, None)
                 self._five_min_bars.pop(symbol, None)
-                self._last_processed_bucket.pop(symbol, None)
 
         self._watchlist = list(new_symbols)
         logger.info(
@@ -630,7 +543,6 @@ class StreamHandler:
         return {
             "watchlist": self._watchlist,
             "watchlist_count": len(self._watchlist),
-            "buffered_symbols": list(self._bar_buffer.keys()),
             "five_min_bars_symbols": {
                 s: len(df) for s, df in self._five_min_bars.items()
             },

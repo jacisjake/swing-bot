@@ -2,14 +2,19 @@
 Simple web API for bot monitoring dashboard.
 """
 
+import secrets
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlencode
 
 import pandas as pd
-from fastapi import FastAPI
+import requests
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
+
+from config import settings
 
 
 app = FastAPI(title="Momentum Day Trader", version="2.0.0")
@@ -66,31 +71,41 @@ async def get_status() -> dict:
     if not _bot:
         return {"error": "Bot not initialized"}
 
+    # Check auth first — if not authenticated, return minimal status
+    if not _bot.client.is_authenticated:
+        return {
+            "running": _bot._running,
+            "authenticated": False,
+            "mode": _bot.config.trading_mode.value,
+            "error": "Not authenticated. Complete OAuth setup via dashboard.",
+        }
+
     try:
         account = _bot.client.get_account()
         equity = float(account.get("equity", 0))
         buying_power = float(account.get("buying_power", 0))
 
-        # Fetch positions directly from Alpaca for accurate P&L
+        # Fetch positions directly from broker for accurate P&L
         positions = _bot.client.get_positions()
         unrealized_pnl = sum(p["unrealized_pl"] for p in positions)
         total_cost = sum(p["cost_basis"] for p in positions)
 
-        # Get stats from Alpaca order history (no local ledger needed)
+        # Get stats from broker order history (no local ledger needed)
         stats = _bot.client.get_trade_stats()
 
         last_sync_dt = _bot.bot_state.get_job_timestamp("broker_sync")
         last_sync = last_sync_dt.isoformat() if last_sync_dt else None
 
-        # Experiment tracking: use actual Alpaca equity
+        # Experiment tracking: use actual broker equity
         # $400 = 0% progress, $4000 = 100% progress
         starting_capital = 400.0
         goal = 4000.0
-        total_pnl = equity - starting_capital  # Actual P&L from Alpaca equity
+        total_pnl = equity - starting_capital  # Actual P&L from broker equity
         progress_pct = ((equity - starting_capital) / (goal - starting_capital)) * 100
 
         return {
             "running": _bot._running,
+            "authenticated": True,
             "mode": _bot.config.trading_mode.value,
             "is_trading_day": _bot.scheduler.is_trading_day(),
             "market_open": _bot.scheduler.is_market_open(),
@@ -98,13 +113,13 @@ async def get_status() -> dict:
             "in_premarket": _bot.scheduler.is_in_premarket(),
             "equity": equity,
             "buying_power": buying_power,
-            # Experiment tracking - based on actual Alpaca equity
+            # Experiment tracking - based on actual broker equity
             "starting_capital": starting_capital,
             "goal": goal,
             "realized_pnl": stats["total_realized_pnl"],
             "unrealized_pnl": unrealized_pnl,
             "total_pnl": total_pnl,
-            "current_value": equity,  # Use actual Alpaca equity
+            "current_value": equity,  # Use actual broker equity
             "progress_pct": progress_pct,  # Can be negative if below $400
             "remaining": goal - equity,
             # Stats
@@ -126,6 +141,11 @@ async def get_status() -> dict:
             # Press release scanner
             "pr_catalyst_count": _bot.press_release_scanner.get_status()["positive_hits"] if hasattr(_bot, "press_release_scanner") else 0,
             "pr_catalyst_symbols": _bot.press_release_scanner.get_catalyst_symbols(positive_only=True)[:10] if hasattr(_bot, "press_release_scanner") else [],
+            # Regime gate
+            "regime_gate_enabled": _bot.config.enable_regime_gate,
+            "regime_category": _bot.regime_detector.category if hasattr(_bot, "regime_detector") else None,
+            "regime_label": _bot.regime_detector.label if hasattr(_bot, "regime_detector") else None,
+            "regime_confidence": _bot.regime_detector.confidence if hasattr(_bot, "regime_detector") else 0,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -133,12 +153,12 @@ async def get_status() -> dict:
 
 @app.get("/api/positions")
 async def get_positions() -> list[dict]:
-    """Get all positions directly from Alpaca."""
+    """Get all positions directly from broker."""
     if not _bot:
         return []
 
     try:
-        # Fetch directly from Alpaca for accurate real-time data
+        # Fetch directly from broker for accurate real-time data
         positions = _bot.client.get_positions()
         results = []
         for p in positions:
@@ -280,9 +300,6 @@ async def get_ws_status() -> dict:
             result = {
                 "data_connected": ws_status.get("data_connected", False),
                 "trade_connected": ws_status.get("trade_connected", False),
-                "news_connected": ws_status.get("news_connected", False),
-                "feed": ws_status.get("feed", ""),
-                "paper": ws_status.get("paper", True),
                 "subscribed_bars": sorted(list(_bot.ws_client._subscribed_bars)),
                 "subscribed_quotes": sorted(list(_bot.ws_client._subscribed_quotes)),
             }
@@ -327,7 +344,7 @@ async def get_press_releases() -> dict:
 
 @app.get("/api/trades")
 async def get_trades(limit: int = 50) -> list[dict]:
-    """Get trade history from Alpaca closed orders."""
+    """Get trade history from broker closed orders."""
     if not _bot:
         return []
 
@@ -357,12 +374,12 @@ async def get_trades(limit: int = 50) -> list[dict]:
 
 @app.get("/api/trades/ledger")
 async def get_trade_ledger(limit: int = 50) -> dict:
-    """Get trade history with P&L from Alpaca order history."""
+    """Get trade history with P&L from broker order history."""
     if not _bot:
         return {"error": "Bot not initialized"}
 
     try:
-        # Get stats directly from Alpaca order history
+        # Get stats directly from broker order history
         stats = _bot.client.get_trade_stats()
 
         # Get current equity for experiment progress
@@ -471,6 +488,56 @@ async def trigger_scan() -> dict:
     return {"status": "ok", "candidates": len(results), "results": results}
 
 
+@app.get("/api/regime")
+async def get_regime() -> dict:
+    """Get current HMM regime status."""
+    if not _bot:
+        return {"error": "Bot not initialized"}
+
+    try:
+        status = _bot.regime_detector.get_status()
+        status["enabled"] = _bot.config.enable_regime_gate
+        return status
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/settings/regime-gate")
+async def toggle_regime_gate(enabled: bool = True) -> dict:
+    """Toggle HMM regime gate on/off."""
+    if not _bot:
+        return {"error": "Bot not initialized"}
+
+    _bot.config.enable_regime_gate = enabled
+
+    # Train on first enable if not yet trained
+    if enabled and not _bot.regime_detector.trained:
+        _bot.regime_detector.refresh()
+
+    status = _bot.regime_detector.get_status()
+    from loguru import logger
+    logger.info(f"[API] Regime gate {'enabled' if enabled else 'disabled'}")
+    return {
+        "status": "ok",
+        "regime_gate_enabled": enabled,
+        "regime": status,
+    }
+
+
+@app.post("/api/regime/refresh")
+async def refresh_regime() -> dict:
+    """Manually refresh regime detection."""
+    if not _bot:
+        return {"error": "Bot not initialized"}
+
+    success = _bot.regime_detector.refresh()
+    status = _bot.regime_detector.get_status()
+    return {
+        "status": "ok" if success else "error",
+        "regime": status,
+    }
+
+
 @app.post("/api/settings/full-day-trading")
 async def toggle_full_day_trading(enabled: bool = True) -> dict:
     """Toggle between early window (7-10 AM) and full day (9:30 AM - 3:55 PM) trading."""
@@ -497,7 +564,7 @@ async def toggle_full_day_trading(enabled: bool = True) -> dict:
 
 @app.get("/api/asset/{symbol}")
 async def get_asset_info(symbol: str) -> dict:
-    """Get asset name and details from Alpaca."""
+    """Get asset name and details from broker."""
     if not _bot:
         return {"error": "Bot not initialized"}
 
@@ -529,7 +596,7 @@ async def get_bars(symbol: str, timeframe: str = "5Min", limit: int = 100) -> di
     try:
         from src.data.indicators import macd
 
-        # Fetch bars from Alpaca
+        # Fetch bars from broker
         bars = _bot.client.get_bars(symbol, timeframe=timeframe, limit=limit)
 
         if bars is None or bars.empty:
@@ -568,6 +635,153 @@ async def get_bars(symbol: str, timeframe: str = "5Min", limit: int = 100) -> di
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+# =========================================================================
+# OAuth2 Endpoints
+# =========================================================================
+
+# CSRF state tokens for OAuth flow (in-memory, short-lived)
+_oauth_states: dict[str, float] = {}
+
+TASTYTRADE_AUTH_URL = "https://my.tastytrade.com/auth.html"
+TASTYTRADE_TOKEN_URL = (
+    "https://api.cert.tastyworks.com/oauth/token"
+    if settings.is_paper
+    else "https://api.tastyworks.com/oauth/token"
+)
+
+
+def _get_oauth_redirect_uri(request: Request) -> str:
+    """Build the OAuth redirect URI, respecting reverse proxy headers."""
+    # Prefer explicit config (required for reverse proxy with path prefix)
+    if settings.tt_oauth_redirect_uri:
+        return settings.tt_oauth_redirect_uri
+    # Fallback: build from request (works for direct access without proxy)
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.url.netloc)
+    return f"{proto}://{host}/oauth/callback"
+
+
+@app.get("/oauth/authorize")
+async def oauth_authorize(request: Request):
+    """Redirect user to tastytrade OAuth login page."""
+    if not settings.tt_client_id:
+        return {"error": "TT_CLIENT_ID not configured in .env"}
+
+    redirect_uri = _get_oauth_redirect_uri(request)
+
+    # Generate CSRF state token
+    state = secrets.token_urlsafe(32)
+    _oauth_states[state] = datetime.now().timestamp()
+
+    params = {
+        "response_type": "code",
+        "client_id": settings.tt_client_id,
+        "redirect_uri": redirect_uri,
+        "scope": "read trade",
+        "state": state,
+    }
+    auth_url = f"{TASTYTRADE_AUTH_URL}?{urlencode(params)}"
+    return RedirectResponse(url=auth_url)
+
+
+@app.get("/oauth/callback")
+async def oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    """Handle tastytrade OAuth callback — exchange code for tokens."""
+    from loguru import logger
+
+    if error:
+        logger.error(f"OAuth error: {error}")
+        return HTMLResponse(
+            content=f"<h2>OAuth Error</h2><p>{error}</p>"
+            '<p><a href="/">Back to dashboard</a></p>',
+            status_code=400,
+        )
+
+    # Validate CSRF state
+    if state not in _oauth_states:
+        return HTMLResponse(
+            content="<h2>Invalid state</h2><p>CSRF validation failed. Try again.</p>"
+            '<p><a href="/">Back to dashboard</a></p>',
+            status_code=400,
+        )
+    del _oauth_states[state]
+
+    # Clean up expired states (older than 10 min)
+    cutoff = datetime.now().timestamp() - 600
+    expired = [k for k, v in _oauth_states.items() if v < cutoff]
+    for k in expired:
+        del _oauth_states[k]
+
+    if not code:
+        return HTMLResponse(
+            content="<h2>No authorization code</h2>"
+            '<p><a href="/">Back to dashboard</a></p>',
+            status_code=400,
+        )
+
+    # Exchange authorization code for tokens
+    redirect_uri = _get_oauth_redirect_uri(request)
+
+    try:
+        resp = requests.post(
+            TASTYTRADE_TOKEN_URL,
+            json={
+                "grant_type": "authorization_code",
+                "client_id": settings.tt_client_id,
+                "client_secret": settings.tt_client_secret,
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        token_data = resp.json()
+    except Exception as e:
+        logger.error(f"OAuth token exchange failed: {e}")
+        return HTMLResponse(
+            content=f"<h2>Token exchange failed</h2><p>{e}</p>"
+            '<p><a href="/">Back to dashboard</a></p>',
+            status_code=500,
+        )
+
+    refresh_token = token_data.get("refresh_token")
+    if not refresh_token:
+        return HTMLResponse(
+            content="<h2>No refresh token in response</h2>"
+            '<p><a href="/">Back to dashboard</a></p>',
+            status_code=500,
+        )
+
+    # Store the refresh token and authenticate the client
+    if _bot:
+        _bot.client.set_refresh_token(refresh_token)
+        logger.info("OAuth flow complete — client authenticated")
+
+    return HTMLResponse(
+        content='<html><body style="background:#0d1117;color:#3fb950;font-family:sans-serif;'
+        'display:flex;justify-content:center;align-items:center;height:100vh">'
+        "<div><h2>Connected to tastytrade!</h2>"
+        '<p style="color:#c9d1d9">Refresh token saved. Redirecting to dashboard...</p>'
+        '</div><script>setTimeout(()=>window.location="/",2000)</script></body></html>'
+    )
+
+
+@app.get("/api/auth/status")
+async def get_auth_status() -> dict:
+    """Get authentication status."""
+    authenticated = _bot.client.is_authenticated if _bot else False
+    auth_mode = "oauth" if (settings.has_oauth or settings.tt_client_secret) else "legacy"
+    has_client_id = bool(settings.tt_client_id)
+
+    return {
+        "authenticated": authenticated,
+        "auth_mode": auth_mode,
+        "has_client_id": has_client_id,
+        "can_start_oauth": has_client_id and bool(settings.tt_client_secret),
+    }
 
 
 DASHBOARD_HTML = """
@@ -811,7 +1025,15 @@ DASHBOARD_HTML = """
 </head>
 <body>
     <div class="container">
-        <h1>Momentum Day Trader <span id="ws-indicator" style="font-size:12px;vertical-align:middle;margin-left:10px;padding:3px 10px;border-radius:12px;background:#f8514922;color:#f85149">WSS &#x25CF; Disconnected</span></h1>
+        <h1>Momentum Day Trader <span id="ws-indicator" style="font-size:12px;vertical-align:middle;margin-left:10px;padding:3px 10px;border-radius:12px;background:#f8514922;color:#f85149">DXLink &#x25CF; Disconnected</span></h1>
+
+        <div id="auth-banner" style="display:none;margin-bottom:20px">
+            <div class="card" style="border-color:#d29922;text-align:center;padding:20px">
+                <div style="font-size:18px;color:#d29922;margin-bottom:10px">Not Connected to tastytrade</div>
+                <p style="color:#8b949e;margin-bottom:15px">Complete OAuth setup to start trading</p>
+                <a href="oauth/authorize" style="display:inline-block;background:#238636;color:#fff;padding:10px 24px;border-radius:6px;text-decoration:none;font-weight:600">Connect tastytrade Account</a>
+            </div>
+        </div>
 
         <div class="grid" id="status-grid">
             <div class="card">
@@ -840,6 +1062,18 @@ DASHBOARD_HTML = """
                 <div class="card-title">Today</div>
                 <div class="card-value" id="trades-today">--</div>
                 <div class="card-subtitle" id="scanner-info">--</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Market Regime</div>
+                <div class="card-value" id="regime-status">--</div>
+                <div class="card-subtitle" id="regime-detail">--</div>
+                <div class="toggle-row">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="regime-gate-toggle" onchange="toggleRegimeGate(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span class="toggle-label">Regime gate</span>
+                </div>
             </div>
         </div>
 
@@ -985,6 +1219,14 @@ DASHBOARD_HTML = """
                 // Store positions globally for chart entry price markers
                 currentPositionsData = positions;
 
+                // Auth banner
+                const authBanner = document.getElementById('auth-banner');
+                if (status.authenticated === false && !status.running) {
+                    authBanner.style.display = 'block';
+                } else {
+                    authBanner.style.display = 'none';
+                }
+
                 // Status
                 const statusEl = document.getElementById('status');
                 const dot = status.running ? 'running' : 'stopped';
@@ -999,15 +1241,15 @@ DASHBOARD_HTML = """
                 if (wsDataOk && wsTradeOk) {
                     wsIndicator.style.background = '#3fb95022';
                     wsIndicator.style.color = '#3fb950';
-                    wsIndicator.innerHTML = `WSS &#x25CF; Connected (${wsSymCount} symbols)`;
+                    wsIndicator.innerHTML = `DXLink &#x25CF; Connected (${wsSymCount} symbols)`;
                 } else if (wsDataOk || wsTradeOk) {
                     wsIndicator.style.background = '#d2992222';
                     wsIndicator.style.color = '#d29922';
-                    wsIndicator.innerHTML = `WSS &#x25CF; Partial`;
+                    wsIndicator.innerHTML = `DXLink &#x25CF; Partial`;
                 } else {
                     wsIndicator.style.background = '#f8514922';
                     wsIndicator.style.color = '#f85149';
-                    wsIndicator.innerHTML = `WSS &#x25CF; Disconnected`;
+                    wsIndicator.innerHTML = `DXLink &#x25CF; Disconnected`;
                 }
 
                 // Progress toward goal ($400 = 0%, $4000 = 100%)
@@ -1074,6 +1316,24 @@ DASHBOARD_HTML = """
                 if (fullDayToggle && !fullDayToggle._userClicked) {
                     fullDayToggle.checked = !!status.full_day_trading;
                 }
+
+                // Regime gate status
+                const regimeEl = document.getElementById('regime-status');
+                const regimeDetail = document.getElementById('regime-detail');
+                const regimeToggle = document.getElementById('regime-gate-toggle');
+                if (regimeToggle && !regimeToggle._userClicked) {
+                    regimeToggle.checked = !!status.regime_gate_enabled;
+                }
+                const regimeLabel = status.regime_label || '--';
+                const regimeCat = status.regime_category || 'neutral';
+                const regimeConf = status.regime_confidence || 0;
+                const regimeColor = regimeCat === 'bullish' ? '#3fb950'
+                    : regimeCat === 'bearish' ? '#f85149' : '#d29922';
+                const regimeIcon = regimeCat === 'bullish' ? '&#x25B2;'
+                    : regimeCat === 'bearish' ? '&#x25BC;' : '&#x25CF;';
+                regimeEl.innerHTML = `<span style="color:${regimeColor}">${regimeIcon} ${regimeLabel}</span>`;
+                const gateStatus = status.regime_gate_enabled ? 'Active' : 'Off';
+                regimeDetail.innerHTML = `${(regimeConf * 100).toFixed(0)}% conf | Gate: ${gateStatus}`;
 
                 // Positions (clickable to show chart)
                 const posTable = document.getElementById('positions-table');
@@ -1217,6 +1477,21 @@ DASHBOARD_HTML = """
                 toggle.checked = !enabled;
             }
             // Let next fetchData cycle pick up the new state
+            setTimeout(() => { toggle._userClicked = false; fetchData(); }, 500);
+        }
+
+        async function toggleRegimeGate(enabled) {
+            const toggle = document.getElementById('regime-gate-toggle');
+            toggle._userClicked = true;
+            try {
+                const resp = await fetch(`api/settings/regime-gate?enabled=${enabled}`, { method: 'POST' });
+                const data = await resp.json();
+                if (data.error) {
+                    toggle.checked = !enabled;
+                }
+            } catch (e) {
+                toggle.checked = !enabled;
+            }
             setTimeout(() => { toggle._userClicked = false; fetchData(); }, 500);
         }
 

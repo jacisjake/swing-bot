@@ -10,6 +10,7 @@ from typing import Optional
 
 from src.bot.config import BotConfig
 from src.bot.signals.base import Signal, SignalDirection
+from src.core.regime_detector import RegimeDetector
 from src.risk.portfolio_limits import PortfolioLimits, TradingAction
 from src.risk.position_sizer import PositionSizer
 
@@ -77,6 +78,7 @@ class SignalProcessor:
         config: BotConfig,
         position_sizer: PositionSizer,
         portfolio_limits: PortfolioLimits,
+        regime_detector: Optional[RegimeDetector] = None,
     ):
         """
         Initialize signal processor.
@@ -85,10 +87,15 @@ class SignalProcessor:
             config: Bot configuration
             position_sizer: Position sizing calculator
             portfolio_limits: Portfolio risk limits
+            regime_detector: Optional HMM regime detector for market-level gating
         """
         self.config = config
         self.position_sizer = position_sizer
         self.portfolio_limits = portfolio_limits
+        self.regime_detector = regime_detector
+
+    # PDT limit: brokers block the 4th day trade in 5 days for margin accounts under $25K
+    PDT_MAX_DAY_TRADES = 3
 
     def process(
         self,
@@ -96,6 +103,7 @@ class SignalProcessor:
         account_equity: float,
         buying_power: float,
         current_positions: int,
+        daytrade_count: int = 0,
     ) -> ProcessResult:
         """
         Process a signal through all validations.
@@ -105,11 +113,21 @@ class SignalProcessor:
             account_equity: Current account equity
             buying_power: Available buying power
             current_positions: Number of open positions
+            daytrade_count: Rolling 5-day day trade count from broker
 
         Returns:
             ProcessResult with trade params or rejection reason
         """
         warnings = []
+
+        # Step 0: PDT guard — don't enter if we can't exit same-day
+        if account_equity < 25_000 and daytrade_count >= self.PDT_MAX_DAY_TRADES:
+            return ProcessResult(
+                passed=False,
+                trade_params=None,
+                rejection_reason=f"PDT protection: {daytrade_count} day trades used (max {self.PDT_MAX_DAY_TRADES} for accounts under $25K)",
+                warnings=warnings,
+            )
 
         # Step 1: Validate signal quality
         rejection = self._check_signal_quality(signal)
@@ -206,6 +224,19 @@ class SignalProcessor:
 
         Returns rejection reason or None if passed.
         """
+        # Check regime gate (market-level filter)
+        if (
+            self.config.enable_regime_gate
+            and self.regime_detector is not None
+            and self.regime_detector.trained
+        ):
+            if self.regime_detector.is_bearish():
+                status = self.regime_detector.get_status()
+                return (
+                    f"Regime gate: {status['label']} ({status['category']}, "
+                    f"{status['confidence']:.0%} confidence)"
+                )
+
         # Check if shorting is allowed
         if signal.direction.value == "short" and not self.config.allow_short_selling:
             return "Short selling disabled"

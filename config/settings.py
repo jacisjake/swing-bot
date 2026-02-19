@@ -26,10 +26,20 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Alpaca credentials
-    alpaca_api_key: str = Field(..., min_length=10)
-    alpaca_secret_key: str = Field(..., min_length=10)
-    alpaca_data_feed: Literal["iex", "sip"] = Field(default="iex")
+    # tastytrade credentials (legacy username/password OR OAuth)
+    tt_username: Optional[str] = Field(default=None)
+    tt_password: Optional[str] = Field(default=None)
+    tt_account_number: str = Field(..., min_length=1)
+
+    # tastytrade OAuth2 credentials
+    tt_client_id: Optional[str] = Field(default=None)
+    tt_client_secret: Optional[str] = Field(default=None)
+    tt_refresh_token: Optional[str] = Field(default=None)
+    tt_oauth_redirect_uri: Optional[str] = Field(
+        default=None,
+        description="OAuth redirect URI (must match developer portal). "
+        "Set this when behind a reverse proxy.",
+    )
 
     # Trading mode
     trading_mode: TradingMode = Field(default=TradingMode.PAPER)
@@ -64,6 +74,21 @@ class Settings(BaseSettings):
     @property
     def is_live(self) -> bool:
         return self.trading_mode == TradingMode.LIVE
+
+    @property
+    def has_oauth(self) -> bool:
+        """True if OAuth credentials are configured (client_secret + refresh_token)."""
+        return bool(self.tt_client_secret and self.tt_refresh_token)
+
+    @property
+    def has_legacy_auth(self) -> bool:
+        """True if legacy username/password credentials are configured."""
+        return bool(self.tt_username and self.tt_password)
+
+    @property
+    def can_authenticate(self) -> bool:
+        """True if any auth method is available."""
+        return self.has_oauth or self.has_legacy_auth
 
 
 @lru_cache

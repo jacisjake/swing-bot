@@ -1,7 +1,8 @@
 """Core trading components."""
 
-from .alpaca_client import AlpacaClient
+from .tastytrade_client import TastytradeClient
 from .order_executor import OrderExecutor
 from .position_manager import PositionManager
+from .regime_detector import RegimeDetector
 
-__all__ = ["AlpacaClient", "OrderExecutor", "PositionManager"]
+__all__ = ["TastytradeClient", "OrderExecutor", "PositionManager", "RegimeDetector"]

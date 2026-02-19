@@ -25,7 +25,7 @@ sys.path.insert(0, ".")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger()
 logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("alpaca").setLevel(logging.WARNING)
+logging.getLogger("tastytrade").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("yfinance").setLevel(logging.WARNING)
@@ -42,8 +42,8 @@ def main():
     )
     args = parser.parse_args()
 
-    from src.core.alpaca_client import AlpacaClient
-    from src.bot.screener import StockScreener, MomentumScreener
+    from src.core.tastytrade_client import TastytradeClient
+    from src.bot.screener import MomentumScreener
     from src.bot.float_provider import FloatDataProvider
     from src.bot.press_release_scanner import PressReleaseScanner
     from src.bot.signals.momentum_pullback import MomentumPullbackStrategy
@@ -51,7 +51,7 @@ def main():
     from config.settings import get_settings
 
     settings = get_settings()
-    client = AlpacaClient()
+    client = TastytradeClient()
     float_provider = FloatDataProvider(fmp_api_key=settings.fmp_api_key)
 
     strategy = MomentumPullbackStrategy(

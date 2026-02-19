@@ -1,7 +1,7 @@
 """
 Position Manager - Track positions, P&L, and trade history.
 
-Maintains local state synchronized with Alpaca, calculates metrics,
+Maintains local state synchronized with broker, calculates metrics,
 and provides position lifecycle management.
 """
 
@@ -251,7 +251,7 @@ class PositionManager:
     - Track open positions with P&L
     - Maintain trade history
     - Calculate portfolio metrics
-    - Sync with Alpaca positions
+    - Sync with broker positions
     """
 
     def __init__(self, trade_ledger=None):

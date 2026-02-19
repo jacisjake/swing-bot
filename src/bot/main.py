@@ -18,7 +18,6 @@ from typing import Optional
 
 from loguru import logger
 
-from config.settings import get_settings
 from src.bot.config import BotConfig, get_bot_config
 from src.bot.executor import TradeExecutor
 from src.bot.float_provider import FloatDataProvider
@@ -33,10 +32,11 @@ from src.bot.signals.momentum_pullback import MomentumPullbackStrategy
 from src.bot.state.persistence import BotState
 from src.bot.state.trade_ledger import TradeLedger
 from src.bot.stream_handler import StreamHandler
-from src.core.alpaca_client import AlpacaClient
+from src.core.regime_detector import RegimeDetector
+from src.core.tastytrade_client import TastytradeClient
 from src.core.order_executor import OrderExecutor
 from src.core.position_manager import PositionManager
-from src.core.ws_client import AlpacaWSClient
+from src.core.tastytrade_ws import TastytradeWSClient
 from src.risk.portfolio_limits import PortfolioLimits
 from src.risk.position_sizer import PositionSizer
 
@@ -60,7 +60,7 @@ class TradingBot:
         self.config = config or get_bot_config()
 
         # Core components
-        self.client = AlpacaClient()
+        self.client = TastytradeClient()
         self.trade_ledger = TradeLedger(
             path="state/trades.json",
             starting_capital=400.0,
@@ -88,10 +88,10 @@ class TradingBot:
         # TradingView screener (primary scanner, no API key required)
         self.tv_screener = TradingViewScreener() if self.config.use_tradingview_screener else None
 
-        # Momentum scanner (TradingView primary, Alpaca fallback)
+        # Momentum scanner (TradingView primary)
         self.momentum_scanner = MomentumScreener(
             float_provider=self.float_provider,
-            alpaca_client=self.client,
+            client=self.client,
             news_enabled=self.config.scanner_enable_news_check,
             news_lookback_hours=self.config.scanner_news_lookback_hours,
             news_max_articles=self.config.scanner_news_max_articles,
@@ -103,6 +103,14 @@ class TradingBot:
         self.press_release_scanner = PressReleaseScanner(
             fmp_api_key=self.config.fmp_api_key,
             lookback_hours=self.config.press_release_lookback_hours,
+            trading_client=self.client,
+        )
+
+        # HMM regime detector (market-level gate)
+        self.regime_detector = RegimeDetector(
+            symbol=self.config.regime_symbol,
+            n_states=self.config.regime_hmm_states,
+            history_days=self.config.regime_history_days,
         )
 
         # Strategy
@@ -127,6 +135,7 @@ class TradingBot:
             config=self.config,
             position_sizer=self.position_sizer,
             portfolio_limits=self.portfolio_limits,
+            regime_detector=self.regime_detector,
         )
         self.executor = TradeExecutor(
             order_executor=self.order_executor,
@@ -139,13 +148,9 @@ class TradingBot:
             trading_window_end=self.config.trading_window_end,
         )
 
-        # WebSocket client (direct, no alpaca-py SDK)
-        settings = get_settings()
-        self.ws_client = AlpacaWSClient(
-            api_key=settings.alpaca_api_key,
-            secret_key=settings.alpaca_secret_key,
-            feed=settings.alpaca_data_feed,
-            paper=settings.is_paper,
+        # WebSocket client (DXLink via tastytrade SDK)
+        self.ws_client = TastytradeWSClient(
+            tastytrade_client=self.client,
             reconnect_max_seconds=self.config.ws_reconnect_max_seconds,
             heartbeat_seconds=self.config.ws_heartbeat_seconds,
         )
@@ -168,12 +173,9 @@ class TradingBot:
         self.ws_client.on_bar(self.stream_handler.on_bar)
         self.ws_client.on_quote(self.stream_handler.on_quote)
         self.ws_client.on_trade_update(self.stream_handler.on_trade_update)
-        self.ws_client.on_news(self.stream_handler.on_news)
 
-        # Scheduler (with Alpaca client for market clock API)
-        # Only time-based jobs: scanner refresh, EOD cleanup, daily reset
-        # Position monitor and broker sync replaced by WebSocket streaming
-        self.scheduler = BotScheduler(self.config, client=self.client)
+        # Scheduler (schedule-based market clock, no broker API needed)
+        self.scheduler = BotScheduler(self.config)
         self.scheduler.set_callbacks(
             momentum_scan=self._run_momentum_scan,
             press_release_scan=self._run_press_release_scan,
@@ -189,9 +191,17 @@ class TradingBot:
 
     async def start(self) -> None:
         """Start the trading bot with WebSocket streaming."""
-        logger.info("Starting momentum day trading bot (WSS mode)...")
+        logger.info("Starting momentum day trading bot (DXLink mode)...")
         logger.info(f"  Mode: {self.config.trading_mode.value}")
-        logger.info(f"  Feed: {get_settings().alpaca_data_feed}")
+
+        # Check authentication — start dashboard-only mode if not authenticated
+        if not self.client.is_authenticated:
+            logger.warning("NOT AUTHENTICATED — dashboard running in setup mode")
+            logger.warning("Complete OAuth setup at the dashboard to start trading")
+            self._running = True
+            await self._shutdown_event.wait()
+            return
+
         if self.config.full_day_trading:
             from datetime import time as dt_time
             self.monitor._window_end = dt_time(15, 55)
@@ -204,9 +214,15 @@ class TradingBot:
             f"{self.config.scanner_min_change_pct}%+ change, "
             f"{self.config.scanner_min_relative_volume}x+ relVol"
         )
-        logger.info(
-            f"  Primary screener: {'TradingView' if self.config.use_tradingview_screener else 'Alpaca'}"
-        )
+        logger.info(f"  Screener: TradingView")
+
+        # 0. Train regime detector (background-safe, non-blocking)
+        if self.config.enable_regime_gate:
+            self.regime_detector.refresh()
+            status = self.regime_detector.get_status()
+            logger.info(f"  Regime gate: {status['label']} ({status['category']}, {status['confidence']:.0%})")
+        else:
+            logger.info("  Regime gate: disabled")
 
         # 1. Initial sync with broker (REST, one-time)
         await self._sync_with_broker()
@@ -219,16 +235,14 @@ class TradingBot:
         # 2. Initial scan (REST) to get watchlist
         await self._run_momentum_scan()
 
-        # 3. Connect WebSocket streams
-        logger.info("[WSS] Connecting to Alpaca WebSocket streams...")
+        # 3. Connect DXLink streams
+        logger.info("[DXLink] Connecting to tastytrade streams...")
         data_ok = await self.ws_client.connect_data()
         trade_ok = await self.ws_client.connect_trades()
-        news_ok = await self.ws_client.connect_news()
 
         logger.info(
-            f"[WSS] Connections: data={'OK' if data_ok else 'FAILED'}, "
-            f"trade={'OK' if trade_ok else 'FAILED'}, "
-            f"news={'OK' if news_ok else 'FAILED'}"
+            f"[DXLink] Connections: data={'OK' if data_ok else 'FAILED'}, "
+            f"trade={'OK' if trade_ok else 'FAILED'}"
         )
 
         # 4. Subscribe to scanner results + open positions
@@ -244,27 +258,22 @@ class TradingBot:
             # Backfill 5-min bar history for stream handler
             for symbol in all_symbols:
                 await self.stream_handler._backfill_bars(symbol)
-            logger.info(f"[WSS] Subscribed to {len(all_symbols)} symbols: {all_symbols}")
-
-        # Subscribe to news for all watchlist symbols
-        if scan_symbols:
-            await self.ws_client.subscribe(news=["*"])  # All news
+            logger.info(f"[DXLink] Subscribed to {len(all_symbols)} symbols: {all_symbols}")
 
         # 5. Start scheduler (reduced: scanner refresh + EOD only)
         self.scheduler.start()
         self._running = True
 
-        logger.info("Trading bot started (WSS mode)")
+        logger.info("Trading bot started (DXLink mode)")
         logger.info("Scheduled jobs:")
         for job in self.scheduler.get_jobs():
             logger.info(f"  - {job['name']}: next run {job['next_run']}")
 
-        # 6. Run WebSocket loops as concurrent tasks
+        # 6. Run DXLink loops as concurrent tasks
         # These auto-reconnect internally, so they run forever until shutdown
         await asyncio.gather(
             self.ws_client.run_data_loop(),
             self.ws_client.run_trade_loop(),
-            self.ws_client.run_news_loop(),
             self._shutdown_event.wait(),
         )
 
@@ -274,9 +283,9 @@ class TradingBot:
 
         self._running = False
 
-        # Disconnect WebSocket streams
+        # Disconnect DXLink streams
         await self.ws_client.disconnect()
-        logger.info("[WSS] Disconnected")
+        logger.info("[DXLink] Disconnected")
 
         self.scheduler.stop()
 
@@ -376,6 +385,7 @@ class TradingBot:
             account = self.client.get_account()
             equity = float(account.get("equity", 0))
             buying_power = float(account.get("buying_power", 0))
+            daytrade_count = int(account.get("daytrade_count", 0))
         except Exception as e:
             logger.error(f"Failed to get account info: {e}")
             return
@@ -414,7 +424,7 @@ class TradingBot:
                         candidate.news_source = f"{best_hit.source} (PR)"
                         candidate.news_count = len(pr_hits)
                     else:
-                        # Already has news from Alpaca — add PR count
+                        # Already has news — add PR count
                         candidate.news_count += len(pr_hits)
 
         if not candidates:
@@ -469,7 +479,7 @@ class TradingBot:
             )
 
             executed = await self._process_signal(
-                gen_signal, equity, buying_power, current_positions
+                gen_signal, equity, buying_power, current_positions, daytrade_count
             )
 
             if executed:
@@ -520,6 +530,7 @@ class TradingBot:
         equity: float,
         buying_power: float,
         current_positions: int,
+        daytrade_count: int = 0,
     ) -> bool:
         """
         Process a signal through validation and execution.
@@ -532,6 +543,7 @@ class TradingBot:
             account_equity=equity,
             buying_power=buying_power,
             current_positions=current_positions,
+            daytrade_count=daytrade_count,
         )
 
         if not result.passed:
@@ -646,6 +658,10 @@ class TradingBot:
 
         # Reset portfolio limits daily counters
         self.portfolio_limits.reset_daily_limits()
+
+        # Refresh regime detector with latest daily bars
+        if self.config.enable_regime_gate:
+            self.regime_detector.refresh()
 
         # Sync fresh state from broker
         await self._sync_with_broker()
@@ -801,6 +817,7 @@ class TradingBot:
                 for c in self._scanner_results[:10]
             ],
             "positions": self.monitor.get_positions_summary(),
+            "regime": self.regime_detector.get_status(),
             "state": self.bot_state.get_state_summary(),
             "jobs": self.scheduler.get_jobs(),
         }

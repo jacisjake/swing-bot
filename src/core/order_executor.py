@@ -15,7 +15,7 @@ from typing import Optional
 
 from loguru import logger
 
-from .alpaca_client import AlpacaClient
+from .tastytrade_client import TastytradeClient
 
 
 class OrderStatus(str, Enum):
@@ -79,7 +79,7 @@ class OrderExecutor:
         "504",
     ]
 
-    def __init__(self, client: AlpacaClient):
+    def __init__(self, client: TastytradeClient):
         self.client = client
 
     def execute_market_order(
@@ -164,23 +164,6 @@ class OrderExecutor:
             wait_for_fill=False,  # Stop orders wait for trigger
         )
 
-    def execute_trailing_stop_order(
-        self,
-        symbol: str,
-        qty: float,
-        side: str,
-        trail_percent: float,
-    ) -> OrderResult:
-        """Execute a trailing stop order."""
-        return self._execute_with_retry(
-            order_type="trailing_stop",
-            symbol=symbol,
-            qty=qty,
-            side=side,
-            trail_percent=trail_percent,
-            wait_for_fill=False,
-        )
-
     def _execute_with_retry(
         self,
         order_type: str,
@@ -189,7 +172,6 @@ class OrderExecutor:
         side: str,
         limit_price: Optional[float] = None,
         stop_price: Optional[float] = None,
-        trail_percent: Optional[float] = None,
         wait_for_fill: bool = True,
         extended_hours: bool = False,
     ) -> OrderResult:
@@ -210,7 +192,6 @@ class OrderExecutor:
                     side=side,
                     limit_price=limit_price,
                     stop_price=stop_price,
-                    trail_percent=trail_percent,
                     extended_hours=extended_hours,
                 )
 
@@ -260,10 +241,9 @@ class OrderExecutor:
         side: str,
         limit_price: Optional[float] = None,
         stop_price: Optional[float] = None,
-        trail_percent: Optional[float] = None,
         extended_hours: bool = False,
     ) -> dict:
-        """Submit order to Alpaca based on type."""
+        """Submit order to tastytrade based on type."""
         # Check if asset supports fractional shares
         if not self.client.is_fractionable(symbol):
             # Round to whole shares for non-fractionable assets
@@ -287,12 +267,6 @@ class OrderExecutor:
                 raise ValueError("stop_price and limit_price required for stop-limit")
             return self.client.submit_stop_limit_order(
                 symbol, qty, side, stop_price, limit_price
-            )
-        elif order_type == "trailing_stop":
-            if trail_percent is None:
-                raise ValueError("trail_percent required for trailing stop")
-            return self.client.submit_trailing_stop_order(
-                symbol, qty, side, trail_percent
             )
         else:
             raise ValueError(f"Unknown order type: {order_type}")

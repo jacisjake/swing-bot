@@ -33,8 +33,9 @@ Examples:
     python scripts/run_bot.py --status           # Show current status
 
 Environment variables (or in .env):
-    ALPACA_API_KEY       - Alpaca API key
-    ALPACA_SECRET_KEY    - Alpaca secret key
+    TT_USERNAME          - tastytrade username
+    TT_PASSWORD          - tastytrade password
+    TT_ACCOUNT_NUMBER    - tastytrade account number
     TRADING_MODE         - paper or live (default: paper)
     BOT_STOCK_WATCHLIST  - Comma-separated stock symbols
     BOT_CRYPTO_WATCHLIST - Comma-separated crypto symbols
@@ -103,10 +104,10 @@ def show_config():
 
 async def show_status():
     """Display current account and position status."""
-    from src.core.alpaca_client import AlpacaClient
+    from src.core.tastytrade_client import TastytradeClient
     from src.core.position_manager import PositionManager
 
-    client = AlpacaClient()
+    client = TastytradeClient()
     position_manager = PositionManager()
 
     print("=" * 60)
@@ -164,10 +165,10 @@ async def check_signals_once():
     from src.bot.config import get_bot_config
     from src.bot.signals.macd import MACDStrategy
     from src.bot.signals.mean_reversion import MeanReversionStrategy
-    from src.core.alpaca_client import AlpacaClient
+    from src.core.tastytrade_client import TastytradeClient
 
     config = get_bot_config()
-    client = AlpacaClient()
+    client = TastytradeClient()
 
     stock_strategy = MACDStrategy(
         fast_period=config.macd_fast_period,

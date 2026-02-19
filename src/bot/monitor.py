@@ -14,7 +14,7 @@ from loguru import logger
 import pytz
 
 from src.bot.signals.base import Signal, SignalDirection, SignalGenerator
-from src.core.alpaca_client import AlpacaClient
+from src.core.tastytrade_client import TastytradeClient, NYSE_HOLIDAYS
 from src.core.position_manager import Position, PositionManager, PositionSide
 
 ET = pytz.timezone("America/New_York")
@@ -54,7 +54,7 @@ class PositionMonitor:
 
     def __init__(
         self,
-        client: AlpacaClient,
+        client: TastytradeClient,
         position_manager: PositionManager,
         strategies: Optional[dict[str, SignalGenerator]] = None,
         trading_window_end: str = "10:00",
@@ -63,7 +63,7 @@ class PositionMonitor:
         Initialize position monitor.
 
         Args:
-            client: Alpaca API client
+            client: tastytrade API client
             position_manager: Position tracking
             strategies: Optional dict of strategy name -> generator for exit signals
             trading_window_end: End of trading window (HH:MM ET) for time-based exit
@@ -328,8 +328,8 @@ class PositionMonitor:
         """
         Check if current time is past the trading window end (ET).
 
-        Uses Alpaca market clock to detect holidays (don't force-close
-        positions on non-trading days when the time coincidentally matches).
+        Uses schedule-based NYSE holiday list to detect holidays
+        (don't force-close positions on non-trading days).
         """
         now_et = datetime.now(ET)
 
@@ -337,25 +337,9 @@ class PositionMonitor:
         if now_et.weekday() >= 5:
             return False
 
-        # Use Alpaca market clock to check if today is a trading day
-        # Don't force time-exit on holidays when market is closed
-        try:
-            clock = self.client.trading.get_clock()
-            if not clock.is_open:
-                # Market is closed — check if it was open today at all
-                # If next_open is today, market hasn't opened yet (pre-market)
-                # If next_open is tomorrow+, today might be a holiday
-                if hasattr(clock.next_open, "astimezone"):
-                    next_open_et = clock.next_open.astimezone(ET)
-                else:
-                    next_open_et = clock.next_open
-
-                if next_open_et.date() > now_et.date() and now_et.time() < self._window_end:
-                    # Holiday: next open is a future day and we haven't hit window end
-                    # Don't trigger time exit
-                    return False
-        except Exception:
-            pass  # Fall through to simple time check
+        # Holiday check — don't trigger time exit on non-trading days
+        if now_et.date() in NYSE_HOLIDAYS:
+            return False
 
         current_time = now_et.time()
         return current_time >= self._window_end

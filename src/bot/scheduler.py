@@ -4,17 +4,16 @@ Momentum day trading scheduler.
 Manages scheduled jobs for the trading day:
 - Pre-market scanning (6:00-7:00 AM ET)
 - Active momentum scanning + signal generation (7:00-10:00 AM ET)
-- Position monitoring (30-second intervals when positions open)
 - End-of-day cleanup (close positions, cancel orders)
 - Safety net close-all (3:55 PM ET)
 - Daily reset (6:00 AM ET)
 
 Uses APScheduler with Eastern Time for all trading jobs.
-Uses Alpaca market clock API for accurate market status (holidays, early closes).
+Uses schedule-based NYSE holiday list for market status.
 """
 
 from datetime import datetime, time
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import Callable, Optional
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -23,9 +22,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
 from src.bot.config import BotConfig
-
-if TYPE_CHECKING:
-    from src.core.alpaca_client import AlpacaClient
+from src.core.tastytrade_client import NYSE_HOLIDAYS
 
 ET = pytz.timezone("America/New_York")
 
@@ -44,16 +41,14 @@ class BotScheduler:
     - Broker sync: every 1 min whenever running
     """
 
-    def __init__(self, config: BotConfig, client: Optional["AlpacaClient"] = None):
+    def __init__(self, config: BotConfig):
         """
         Initialize scheduler.
 
         Args:
             config: Bot configuration
-            client: Alpaca client for market clock API (accurate holidays/early closes)
         """
         self.config = config
-        self.client = client
         self.scheduler = AsyncIOScheduler(timezone="America/New_York")
 
         # Job callbacks (set by TradingBot)
@@ -66,11 +61,6 @@ class BotScheduler:
 
         # Track state
         self._is_running = False
-
-        # Market clock cache (refreshed every 5 minutes to avoid excessive API calls)
-        self._market_clock_cache: Optional[dict] = None
-        self._market_clock_cache_time: Optional[datetime] = None
-        self._CLOCK_CACHE_TTL_SECONDS = 300  # 5 minutes
 
         # Parse trading window times from config
         self._premarket_start = self._parse_time(config.premarket_scan_start)
@@ -238,89 +228,24 @@ class BotScheduler:
                 replace_existing=True,
             )
 
-    # ── Market Clock (Alpaca API) ────────────────────────────────────────
-
-    def _get_market_clock(self) -> Optional[dict]:
-        """
-        Get market clock from Alpaca API with caching.
-
-        Returns dict with:
-            is_open: bool - whether market is currently open
-            next_open: datetime - next market open time
-            next_close: datetime - next market close time
-
-        Uses a 5-minute cache to avoid excessive API calls.
-        Falls back to simple time-based checks if API is unavailable.
-        """
-        if self.client is None:
-            return None
-
-        now = datetime.now(ET)
-
-        # Return cached value if fresh
-        if (
-            self._market_clock_cache is not None
-            and self._market_clock_cache_time is not None
-            and (now - self._market_clock_cache_time).total_seconds() < self._CLOCK_CACHE_TTL_SECONDS
-        ):
-            return self._market_clock_cache
-
-        try:
-            clock = self.client.trading.get_clock()
-            self._market_clock_cache = {
-                "is_open": clock.is_open,
-                "next_open": clock.next_open,
-                "next_close": clock.next_close,
-            }
-            self._market_clock_cache_time = now
-            return self._market_clock_cache
-        except Exception as e:
-            logger.warning(f"Market clock API error (using time fallback): {e}")
-            return None
+    # ── Market Clock (Schedule-Based) ────────────────────────────────────
 
     def is_trading_day(self) -> bool:
         """
         Check if today is a trading day (not weekend, not holiday).
 
-        Uses Alpaca market clock to accurately detect holidays.
-        Falls back to simple weekday check if API unavailable.
+        Uses static NYSE holiday list for accurate holiday detection.
         """
         now_et = datetime.now(ET)
 
-        # Weekend check (fast path, no API needed)
+        # Weekend check (fast path)
         if now_et.weekday() >= 5:
             return False
 
-        # Use Alpaca market clock for holiday detection
-        clock = self._get_market_clock()
-        if clock is not None:
-            # If the market is open, it's definitely a trading day
-            if clock["is_open"]:
-                return True
+        # Holiday check
+        if now_et.date() in NYSE_HOLIDAYS:
+            return False
 
-            # If market is closed, check if next_open is today
-            # (market might just be in pre/post-market hours on a valid trading day)
-            next_open = clock["next_open"]
-            if next_open is not None:
-                # Convert to ET for comparison
-                if hasattr(next_open, "astimezone"):
-                    next_open_et = next_open.astimezone(ET)
-                else:
-                    next_open_et = next_open
-
-                # If next open is today, it's a trading day (just not market hours yet)
-                if next_open_et.date() == now_et.date():
-                    return True
-
-                # If next open is tomorrow (or later), today might be a holiday
-                # But only if we're past when the market should have opened (9:30 AM)
-                if now_et.time() >= time(9, 30) and next_open_et.date() > now_et.date():
-                    logger.info(
-                        f"Market holiday detected - next open: {next_open_et.strftime('%Y-%m-%d %H:%M')} ET"
-                    )
-                    return False
-
-        # Fallback: assume weekdays are trading days
         return True
 
     # ── Trading Window Helpers ───────────────────────────────────────────
@@ -330,8 +255,7 @@ class BotScheduler:
         Check if we're inside the active trading window.
 
         Returns True between trading_window_start and trading_window_end ET,
-        but only on valid trading days (uses Alpaca market clock for holidays).
-        This is the window where new entries are allowed.
+        but only on valid trading days. This is the window where new entries are allowed.
         """
         if not self.is_trading_day():
             return False
@@ -362,35 +286,20 @@ class BotScheduler:
         """
         Check if US stock market is currently open.
 
-        Uses Alpaca market clock API for accurate status
-        (handles holidays, early closes, etc.).
-        Falls back to simple time check if API unavailable.
+        Uses schedule-based check with NYSE holiday list.
         """
-        clock = self._get_market_clock()
-        if clock is not None:
-            return clock["is_open"]
-
-        # Fallback: simple time-based check
         now_et = datetime.now(ET)
+
         if now_et.weekday() >= 5:
+            return False
+
+        if now_et.date() in NYSE_HOLIDAYS:
             return False
 
         current_time = now_et.time()
         market_open = time(9, 30)
         market_close = time(16, 0)
         return market_open <= current_time < market_close
-
-    def get_next_market_close(self) -> Optional[datetime]:
-        """
-        Get the next market close time from Alpaca API.
-
-        Useful for early close days (e.g., 1:00 PM on day before holidays).
-        Returns None if API unavailable.
-        """
-        clock = self._get_market_clock()
-        if clock is not None:
-            return clock.get("next_close")
-        return None
 
     def time_until_window_open(self) -> Optional[float]:
         """

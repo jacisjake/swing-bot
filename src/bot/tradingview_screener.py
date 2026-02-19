@@ -5,16 +5,12 @@ Uses the tradingview-screener package (no API key required) to find:
 - Pre-market gappers with high change%, volume, and low float
 - Active session movers with relative volume breakouts
 
-Replaces the Alpaca StockScreener.get_market_movers() endpoint as the
-primary data source. Alpaca's movers endpoint shows PREVIOUS-DAY movers
-during pre-market hours — it doesn't update until market open. TradingView
-provides real pre-market data starting at 4:00 AM ET.
+Primary data source for the momentum screener. TradingView provides
+real pre-market data starting at 4:00 AM ET.
 
 Data has ~15-minute delay without auth cookies, which is acceptable
 for scanner/watchlist building. Actual trade entries are validated against
-real-time Alpaca bar/quote data before execution.
-
-Fallback: If TradingView fails, MomentumScreener falls back to Alpaca screener.
+real-time DXLink bar/quote data before execution.
 """
 
 from datetime import datetime
@@ -38,13 +34,12 @@ class TradingViewScreener:
       These update once the market opens.
 
     Only returns stocks listed on NYSE, NASDAQ, or AMEX — filters out OTC/pink
-    sheets that Alpaca cannot trade.
+    sheets that are not tradable.
 
-    Returns list[ScreenerResult] matching the same interface as StockScreener
-    so the downstream MomentumScreener pipeline is unchanged.
+    Returns list[ScreenerResult] for the downstream MomentumScreener pipeline.
     """
 
-    # Only include stocks on exchanges Alpaca can trade
+    # Only include stocks on major US exchanges
     US_EXCHANGES = ["NYSE", "NASDAQ", "AMEX"]
 
     def __init__(self):

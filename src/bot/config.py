@@ -117,20 +117,20 @@ class BotConfig(Settings):
     )
     scanner_enable_float_filter: bool = Field(
         default=True,
-        description="Enable float filtering (requires FMP API key or yfinance)",
+        description="Enable float filtering (requires FMP API key)",
     )
     scanner_top_n: int = Field(
         default=20,
         ge=5,
         le=50,
-        description="Number of gainers to fetch from Alpaca screener API",
+        description="Number of gainers to fetch from screener",
     )
 
     # ── Catalyst / News Settings (5th Pillar) ────────────────────────────
 
     scanner_enable_news_check: bool = Field(
         default=True,
-        description="Check for news catalysts during enrichment (uses Alpaca News API)",
+        description="Check for news catalysts during enrichment",
     )
     scanner_news_lookback_hours: int = Field(
         default=12,
@@ -149,7 +149,7 @@ class BotConfig(Settings):
 
     use_tradingview_screener: bool = Field(
         default=True,
-        description="Use TradingView as primary screener (falls back to Alpaca on failure)",
+        description="Use TradingView as primary screener",
     )
 
     # ── Press Release Scanner (Pre-Market Catalyst Detection) ────────────
@@ -302,6 +302,29 @@ class BotConfig(Settings):
     stock_watchlist: str = Field(
         default="",
         description="Static stock watchlist (empty = fully scanner-driven)",
+    )
+
+    # ── HMM Regime Gate ────────────────────────────────────────────────
+
+    enable_regime_gate: bool = Field(
+        default=False,
+        description="Gate entries on HMM market regime (block trades during bearish regimes)",
+    )
+    regime_symbol: str = Field(
+        default="SPY",
+        description="Market proxy symbol for regime detection",
+    )
+    regime_hmm_states: int = Field(
+        default=7,
+        ge=3,
+        le=10,
+        description="Number of HMM hidden states for regime model",
+    )
+    regime_history_days: int = Field(
+        default=730,
+        ge=90,
+        le=2000,
+        description="Days of history for regime training",
     )
 
     # ── WebSocket Settings ────────────────────────────────────────────

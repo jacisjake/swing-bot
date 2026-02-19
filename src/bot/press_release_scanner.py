@@ -168,8 +168,8 @@ NEGATIVE_CATALYST_KEYWORDS = [
 
 # US exchange ticker patterns — only match stocks listed on US exchanges.
 # Pattern 1: Explicit US exchange reference like "(NASDAQ: ABCD)" — guaranteed US-listed.
-# Pattern 2: Generic "(ticker: ABCD)" — needs Alpaca validation.
-# Pattern 3: Company name suffix like "Inc. (ABCD)" — needs Alpaca validation.
+# Pattern 2: Generic "(ticker: ABCD)" — needs broker validation.
+# Pattern 3: Company name suffix like "Inc. (ABCD)" — needs broker validation.
 US_EXCHANGE_PATTERN = re.compile(
     r"\((?:NASDAQ|NYSE|NYSEAMERICAN|OTC(?:QB|QX)?|AMEX|CBOE)\s*:\s*([A-Z]{1,5})\)",
     re.IGNORECASE,
@@ -229,6 +229,7 @@ class PressReleaseScanner:
         rss_feeds: Optional[dict] = None,
         lookback_hours: int = 16,
         request_timeout: int = 10,
+        trading_client=None,
     ):
         """
         Initialize press release scanner.
@@ -238,6 +239,7 @@ class PressReleaseScanner:
             rss_feeds: Custom RSS feed config (defaults to built-in feeds)
             lookback_hours: How far back to look for press releases (16h = covers overnight)
             request_timeout: HTTP request timeout in seconds
+            trading_client: TastytradeClient instance for ticker validation
         """
         self.fmp_api_key = fmp_api_key
         self.rss_feeds = rss_feeds or RSS_FEEDS
@@ -249,10 +251,10 @@ class PressReleaseScanner:
         self._last_scan_time: Optional[datetime] = None
         self._seen_urls: set[str] = set()  # Dedup across scans within same day
 
-        # US-exchange validation cache (avoid repeated Alpaca API calls)
+        # US-exchange validation cache (avoid repeated API calls)
         # Maps ticker -> True (US-tradable) or False (not found / non-US)
         self._us_ticker_cache: dict[str, bool] = {}
-        self._trading_client = None  # Lazy-init for ticker validation
+        self._trading_client = trading_client
 
         # Rate limiting for RSS feeds
         self._last_feed_fetch: dict[str, float] = {}
@@ -576,7 +578,7 @@ class PressReleaseScanner:
         Looks for patterns like:
         - "(NASDAQ: ABCD)" — guaranteed US-listed
         - "(NYSE: XYZ)" — guaranteed US-listed
-        - "Company Inc. (ABCD)" — validated via Alpaca API
+        - "Company Inc. (ABCD)" — validated via broker API
 
         Args:
             text: Combined title + description text
@@ -608,7 +610,7 @@ class PressReleaseScanner:
 
     def _is_us_tradable(self, ticker: str) -> bool:
         """
-        Check if a ticker is tradable on US exchanges via Alpaca.
+        Check if a ticker is tradable on US exchanges.
 
         Uses a cache to avoid hammering the API. Tickers confirmed once
         stay cached for the entire session (daily reset clears cache).
@@ -617,25 +619,18 @@ class PressReleaseScanner:
             ticker: Uppercase ticker symbol
 
         Returns:
-            True if the symbol is active and tradable on Alpaca
+            True if the symbol is active and tradable
         """
         if ticker in self._us_ticker_cache:
             return self._us_ticker_cache[ticker]
 
         try:
             if self._trading_client is None:
-                from alpaca.trading.client import TradingClient
-                from config.settings import get_settings
-
-                settings = get_settings()
-                self._trading_client = TradingClient(
-                    api_key=settings.alpaca_api_key,
-                    secret_key=settings.alpaca_secret_key,
-                    paper=settings.is_paper,
-                )
+                self._us_ticker_cache[ticker] = False
+                return False
 
             asset = self._trading_client.get_asset(ticker)
-            is_tradable = bool(asset.tradable and asset.status.value == "active")
+            is_tradable = bool(asset and asset.get("name"))
             self._us_ticker_cache[ticker] = is_tradable
             return is_tradable
 
