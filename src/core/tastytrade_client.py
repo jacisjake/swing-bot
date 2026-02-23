@@ -398,6 +398,28 @@ class TastytradeClient:
                 columns=["open", "high", "low", "close", "volume", "vwap"]
             )
 
+    def _create_sdk_session(self):
+        """Create a fresh SDK session (not cached).
+
+        Used by get_bars() which runs in a thread pool via asyncio.run().
+        Each asyncio.run() creates and closes its own event loop, so the
+        session must be fresh — a cached session's HTTP client would be
+        bound to a closed loop from a previous asyncio.run() call.
+        """
+        from tastytrade import Session
+        if self._use_oauth and self._refresh_token:
+            return Session(
+                settings.tt_client_secret,
+                self._refresh_token,
+                is_test=settings.is_paper,
+            )
+        else:
+            return Session(
+                settings.tt_username,
+                settings.tt_password,
+                is_test=settings.is_paper,
+            )
+
     async def _fetch_candles_async(
         self,
         symbol: str,
@@ -414,7 +436,9 @@ class TastytradeClient:
         end_dt = end or datetime.now(timezone.utc)
         start_dt = self._calculate_start_time(timeframe, limit, end_dt)
 
-        session = self._get_sdk_session()
+        # Fresh session each call — asyncio.run() closes its event loop,
+        # so a cached session's HTTP client would be on a dead loop.
+        session = self._create_sdk_session()
         candles: list[dict] = []
 
         async with DXLinkStreamer(session) as streamer:
