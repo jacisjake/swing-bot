@@ -230,6 +230,10 @@ class TastytradeWSClient:
 
         Listens for Candle and Quote events and dispatches to callbacks.
         DXLink sends native 5-min candles — no aggregation needed.
+
+        Catches BaseException (not just Exception) because the tastytrade SDK
+        raises BaseExceptionGroup from anyio task groups on keepalive timeout,
+        and cleanup RuntimeErrors cascade from broken async generators.
         """
         from tastytrade.dxfeed import Quote
 
@@ -286,48 +290,75 @@ class TastytradeWSClient:
                         raise task.exception()
 
             except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning(f"[WS:DATA] Stream error: {e}")
-                self._data_connected = False
-                if self._streamer:
-                    try:
-                        await self._streamer.__aexit__(None, None, None)
-                    except Exception:
-                        pass
-                    self._streamer = None
+                if self._shutting_down:
+                    break
+                # CancelledError from SDK cancel scope — treat as disconnect
+                logger.warning("[WS:DATA] Cancelled by SDK cancel scope, reconnecting...")
+                self._force_reset_streamer()
                 await asyncio.sleep(min(backoff, self._reconnect_max))
                 backoff *= 2
+            except BaseException as e:
+                # Catch BaseException to handle BaseExceptionGroup from anyio
+                # and RuntimeError from async generator cleanup
+                if self._shutting_down:
+                    break
+                logger.warning(f"[WS:DATA] Stream error ({type(e).__name__}): {e}")
+                self._force_reset_streamer()
+                await asyncio.sleep(min(backoff, self._reconnect_max))
+                backoff = min(backoff * 2, self._reconnect_max)
+
+    def _force_reset_streamer(self) -> None:
+        """
+        Force-reset streamer state after a crash.
+
+        Does NOT call __aexit__ — the SDK's cleanup is itself broken when
+        the keepalive timeout fires (RuntimeError from cancel scopes).
+        Just null everything out and let GC collect it.
+        Also resets the SDK session so reconnect gets a fresh one.
+        """
+        self._data_connected = False
+        self._streamer = None
+        # Force a fresh SDK session on next connect (old one is tainted)
+        self._client._sdk_session = None
+        logger.info("[WS:DATA] Streamer force-reset for reconnect")
 
     async def _listen_candles(self) -> None:
         """Listen for DXLink candle events and dispatch to callback."""
         from tastytrade.dxfeed import Candle
 
-        async for candle in self._streamer.listen(Candle):
-            if self._shutting_down:
-                break
-            if self._on_bar:
-                try:
-                    bar_msg = self._normalize_candle(candle)
-                    if bar_msg:
-                        await self._on_bar(bar_msg)
-                except Exception as e:
-                    logger.error(f"[WS:DATA] Bar callback error: {e}")
+        try:
+            async for candle in self._streamer.listen(Candle):
+                if self._shutting_down:
+                    break
+                if self._on_bar:
+                    try:
+                        bar_msg = self._normalize_candle(candle)
+                        if bar_msg:
+                            await self._on_bar(bar_msg)
+                    except Exception as e:
+                        logger.error(f"[WS:DATA] Bar callback error: {e}")
+        except BaseException as e:
+            # Re-raise as RuntimeError so run_data_loop's BaseException handler
+            # catches it cleanly (avoids BaseExceptionGroup propagation issues)
+            raise RuntimeError(f"Candle listener died: {type(e).__name__}: {e}") from None
 
     async def _listen_quotes(self) -> None:
         """Listen for DXLink quote events and dispatch to callback."""
         from tastytrade.dxfeed import Quote
 
-        async for quote in self._streamer.listen(Quote):
-            if self._shutting_down:
-                break
-            if self._on_quote:
-                try:
-                    quote_msg = self._normalize_quote(quote)
-                    if quote_msg:
-                        await self._on_quote(quote_msg)
-                except Exception as e:
-                    logger.error(f"[WS:DATA] Quote callback error: {e}")
+        try:
+            async for quote in self._streamer.listen(Quote):
+                if self._shutting_down:
+                    break
+                if self._on_quote:
+                    try:
+                        quote_msg = self._normalize_quote(quote)
+                        if quote_msg:
+                            await self._on_quote(quote_msg)
+                    except Exception as e:
+                        logger.error(f"[WS:DATA] Quote callback error: {e}")
+        except BaseException as e:
+            raise RuntimeError(f"Quote listener died: {type(e).__name__}: {e}") from None
 
     async def run_trade_loop(self) -> None:
         """
@@ -483,9 +514,10 @@ class TastytradeWSClient:
         if self._streamer:
             try:
                 await self._streamer.__aexit__(None, None, None)
-                logger.info("[WS:DATA] DXLink disconnected")
-            except Exception as e:
-                logger.debug(f"[WS:DATA] Error during disconnect: {e}")
+                logger.info("[WS:DATA] DXLink disconnected cleanly")
+            except BaseException as e:
+                # SDK cleanup can fail with RuntimeError / BaseExceptionGroup
+                logger.debug(f"[WS:DATA] Disconnect cleanup error (ignored): {type(e).__name__}")
             self._streamer = None
 
         self._data_connected = False

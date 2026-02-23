@@ -270,12 +270,31 @@ class TradingBot:
             logger.info(f"  - {job['name']}: next run {job['next_run']}")
 
         # 6. Run DXLink loops as concurrent tasks
-        # These auto-reconnect internally, so they run forever until shutdown
+        # Wrapped with crash recovery so a streamer failure doesn't kill the bot
         await asyncio.gather(
-            self.ws_client.run_data_loop(),
+            self._resilient_data_loop(),
             self.ws_client.run_trade_loop(),
             self._shutdown_event.wait(),
         )
+
+    async def _resilient_data_loop(self) -> None:
+        """Run the data loop with top-level crash recovery.
+
+        If run_data_loop somehow exits (unhandled error), restart it
+        rather than letting the entire bot die.
+        """
+        while not self._shutdown_event.is_set():
+            try:
+                await self.ws_client.run_data_loop()
+            except asyncio.CancelledError:
+                break
+            except BaseException as e:
+                logger.error(
+                    f"[DXLink] Data loop crashed ({type(e).__name__}: {e}), "
+                    f"restarting in 10s..."
+                )
+                self.ws_client._force_reset_streamer()
+                await asyncio.sleep(10)
 
     async def stop(self) -> None:
         """Stop the trading bot gracefully."""

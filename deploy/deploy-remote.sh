@@ -35,10 +35,16 @@ rsync -avz --delete \
     --exclude '.env' \
     "$PROJECT_DIR/" "$REMOTE_HOST:$REMOTE_DIR/"
 
-# Copy .env file separately (contains secrets)
-if [ -f "$PROJECT_DIR/.env" ]; then
-    echo "Copying .env file..."
-    scp "$PROJECT_DIR/.env" "$REMOTE_HOST:$REMOTE_DIR/.env"
+# Copy .env only if remote doesn't have one (never overwrite server secrets)
+if ssh "$REMOTE_HOST" "[ ! -f $REMOTE_DIR/.env ]" 2>/dev/null; then
+    if [ -f "$PROJECT_DIR/.env" ]; then
+        echo "Copying .env file (first deploy)..."
+        scp "$PROJECT_DIR/.env" "$REMOTE_HOST:$REMOTE_DIR/.env"
+    else
+        echo "WARNING: No .env file found locally or on server"
+    fi
+else
+    echo "Using existing .env on server (not overwriting)"
 fi
 
 # Build and run on remote
