@@ -361,10 +361,7 @@ class TastytradeClient:
         end: Optional[datetime] = None,
     ) -> pd.DataFrame:
         """
-        Get historical bars for a symbol via DXLink candle backfill.
-
-        Runs an async DXLink candle subscription in a background thread
-        to fetch historical data, then returns as a DataFrame.
+        Get historical bars for a symbol via yfinance.
 
         Args:
             symbol: Stock ticker (e.g., "AAPL")
@@ -375,7 +372,11 @@ class TastytradeClient:
         Returns:
             DataFrame with columns: open, high, low, close, volume, vwap
         """
-        # Check cache first (avoids redundant DXLink connections during scans)
+        empty = pd.DataFrame(
+            columns=["open", "high", "low", "close", "volume", "vwap"]
+        )
+
+        # Check cache first
         cache_key = (symbol, timeframe)
         cached = self._bar_cache.get(cache_key)
         if cached and end is None:
@@ -383,20 +384,72 @@ class TastytradeClient:
             if time.time() - cache_time < self._bar_cache_ttl and len(cache_df) >= limit:
                 return cache_df.tail(limit)
 
-        future = _thread_pool.submit(
-            asyncio.run,
-            self._fetch_candles_async(symbol, timeframe, limit, end),
-        )
         try:
-            df = future.result(timeout=30)
+            df = self._fetch_bars_yfinance(symbol, timeframe, limit, end)
             if not df.empty and end is None:
                 self._bar_cache[cache_key] = (time.time(), df)
             return df
         except Exception as e:
             logger.error(f"get_bars failed for {symbol}: {e}")
+            return empty
+
+    def _fetch_bars_yfinance(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+        end: Optional[datetime],
+    ) -> pd.DataFrame:
+        """Fetch historical bars from yfinance (no WebSocket needed)."""
+        import yfinance as yf
+
+        # Map timeframe to yfinance interval + period
+        tf_lower = timeframe.lower().replace(" ", "")
+        yf_intervals = {
+            "1min": ("1m", "1d"),     # 1-min: max 7 days
+            "5min": ("5m", "5d"),     # 5-min: max 60 days
+            "15min": ("15m", "5d"),
+            "30min": ("30m", "5d"),
+            "1hour": ("1h", "30d"),
+            "4hour": ("1h", "60d"),   # yf has no 4h; fetch 1h, resample later
+            "1day": ("1d", "6mo"),
+            "1week": ("1wk", "2y"),
+        }
+
+        if tf_lower not in yf_intervals:
+            raise ValueError(f"Unknown timeframe: {timeframe}")
+
+        interval, period = yf_intervals[tf_lower]
+
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period=period, interval=interval)
+
+        if df.empty:
             return pd.DataFrame(
                 columns=["open", "high", "low", "close", "volume", "vwap"]
             )
+
+        # Normalize column names to lowercase
+        df.columns = [c.lower() for c in df.columns]
+
+        # Keep only OHLCV columns, add vwap placeholder
+        cols = ["open", "high", "low", "close", "volume"]
+        df = df[[c for c in cols if c in df.columns]]
+        if "vwap" not in df.columns:
+            df["vwap"] = 0.0
+
+        # Ensure UTC timezone on index
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+        else:
+            df.index = df.index.tz_convert("UTC")
+
+        # Filter by end date if specified
+        if end:
+            end_utc = end if end.tzinfo else end.replace(tzinfo=timezone.utc)
+            df = df[df.index <= end_utc]
+
+        return df.tail(limit)
 
     def _create_sdk_session(self):
         """Create a fresh SDK session (not cached).

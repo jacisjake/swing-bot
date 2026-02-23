@@ -91,7 +91,7 @@ class TastytradeWSClient:
     # ── Connection Lifecycle ───────────────────────────────────────────
 
     async def connect_data(self) -> bool:
-        """Connect to DXLink market data stream."""
+        """Connect to DXLink market data stream (30s timeout)."""
         try:
             from tastytrade import DXLinkStreamer
             from tastytrade.dxfeed import Candle, Quote
@@ -99,12 +99,18 @@ class TastytradeWSClient:
             self._loop = asyncio.get_running_loop()
             session = self._client._get_sdk_session()
             self._streamer = DXLinkStreamer(session)
-            await self._streamer.__aenter__()
+            await asyncio.wait_for(self._streamer.__aenter__(), timeout=30)
             self._data_connected = True
             logger.info("[WS:DATA] DXLink connected")
             return True
+        except asyncio.TimeoutError:
+            logger.error("[WS:DATA] DXLink connection timed out (30s)")
+            self._streamer = None
+            self._data_connected = False
+            return False
         except Exception as e:
             logger.error(f"[WS:DATA] DXLink connection failed: {e}")
+            self._streamer = None
             self._data_connected = False
             return False
 
@@ -315,11 +321,15 @@ class TastytradeWSClient:
         the keepalive timeout fires (RuntimeError from cancel scopes).
         Just null everything out and let GC collect it.
         Also resets the SDK session so reconnect gets a fresh one.
+        Clears subscription sets so symbols get re-subscribed on reconnect.
         """
         self._data_connected = False
         self._streamer = None
         # Force a fresh SDK session on next connect (old one is tainted)
         self._client._sdk_session = None
+        # Clear subscription tracking so reconnect re-subscribes everything
+        self._subscribed_bars.clear()
+        self._subscribed_quotes.clear()
         logger.info("[WS:DATA] Streamer force-reset for reconnect")
 
     async def _listen_candles(self) -> None:

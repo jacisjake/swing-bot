@@ -294,7 +294,9 @@ class TradingBot:
         """
         while not self._shutdown_event.is_set():
             try:
+                logger.debug("[DXLink] Entering data loop...")
                 await self.ws_client.run_data_loop()
+                logger.warning("[DXLink] Data loop exited normally")
             except BaseException as e:
                 if self._shutdown_event.is_set():
                     break
