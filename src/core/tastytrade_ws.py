@@ -337,10 +337,12 @@ class TastytradeWSClient:
                             await self._on_bar(bar_msg)
                     except Exception as e:
                         logger.error(f"[WS:DATA] Bar callback error: {e}")
+        except asyncio.CancelledError:
+            raise  # Let CancelledError propagate normally
         except BaseException as e:
-            # Re-raise as RuntimeError so run_data_loop's BaseException handler
-            # catches it cleanly (avoids BaseExceptionGroup propagation issues)
-            raise RuntimeError(f"Candle listener died: {type(e).__name__}: {e}") from None
+            # Convert SDK errors (BaseExceptionGroup etc) to RuntimeError
+            # so run_data_loop can catch them cleanly
+            raise RuntimeError(f"Candle listener: {type(e).__name__}: {e}") from None
 
     async def _listen_quotes(self) -> None:
         """Listen for DXLink quote events and dispatch to callback."""
@@ -357,8 +359,10 @@ class TastytradeWSClient:
                             await self._on_quote(quote_msg)
                     except Exception as e:
                         logger.error(f"[WS:DATA] Quote callback error: {e}")
+        except asyncio.CancelledError:
+            raise
         except BaseException as e:
-            raise RuntimeError(f"Quote listener died: {type(e).__name__}: {e}") from None
+            raise RuntimeError(f"Quote listener: {type(e).__name__}: {e}") from None
 
     async def run_trade_loop(self) -> None:
         """

@@ -269,31 +269,54 @@ class TradingBot:
         for job in self.scheduler.get_jobs():
             logger.info(f"  - {job['name']}: next run {job['next_run']}")
 
-        # 6. Run DXLink loops as concurrent tasks
-        # Wrapped with crash recovery so a streamer failure doesn't kill the bot
-        await asyncio.gather(
-            self._resilient_data_loop(),
-            self.ws_client.run_trade_loop(),
-            self._shutdown_event.wait(),
-        )
+        # 6. Run DXLink loops as independent tasks
+        # NOT asyncio.gather — the SDK's anyio cancel scopes leak CancelledError
+        # which would cancel ALL tasks in a gather. Independent tasks are isolated.
+        data_task = asyncio.create_task(self._resilient_data_loop())
+        trade_task = asyncio.create_task(self._resilient_trade_loop())
+
+        # Wait for shutdown signal (only thing in this coroutine)
+        await self._shutdown_event.wait()
+
+        # Clean shutdown: cancel the background tasks
+        for task in [data_task, trade_task]:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, BaseException):
+                pass
 
     async def _resilient_data_loop(self) -> None:
-        """Run the data loop with top-level crash recovery.
+        """Run the DXLink data loop with crash recovery.
 
-        If run_data_loop somehow exits (unhandled error), restart it
-        rather than letting the entire bot die.
+        Catches everything including CancelledError from SDK cancel scopes
+        and BaseExceptionGroup from anyio task groups. Restarts automatically.
         """
         while not self._shutdown_event.is_set():
             try:
                 await self.ws_client.run_data_loop()
-            except asyncio.CancelledError:
-                break
             except BaseException as e:
+                if self._shutdown_event.is_set():
+                    break
                 logger.error(
                     f"[DXLink] Data loop crashed ({type(e).__name__}: {e}), "
                     f"restarting in 10s..."
                 )
                 self.ws_client._force_reset_streamer()
+                await asyncio.sleep(10)
+
+    async def _resilient_trade_loop(self) -> None:
+        """Run the order polling loop with crash recovery."""
+        while not self._shutdown_event.is_set():
+            try:
+                await self.ws_client.run_trade_loop()
+            except BaseException as e:
+                if self._shutdown_event.is_set():
+                    break
+                logger.error(
+                    f"[DXLink] Trade loop crashed ({type(e).__name__}: {e}), "
+                    f"restarting in 10s..."
+                )
                 await asyncio.sleep(10)
 
     async def stop(self) -> None:
