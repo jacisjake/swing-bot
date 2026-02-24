@@ -55,12 +55,13 @@ class StreamHandler:
         client: "TastytradeClient",
         ws_client: "TastytradeWSClient",
         config,
+        strategies: Optional[dict] = None,
     ):
         """
         Initialize stream handler.
 
         Args:
-            strategy: MomentumPullbackStrategy for signal generation
+            strategy: Default strategy for signal generation
             processor: SignalProcessor for risk checks
             executor: TradeExecutor for order execution
             monitor: PositionMonitor for exit checks
@@ -70,8 +71,10 @@ class StreamHandler:
             client: REST client for backfill and account data
             ws_client: DXLink client for subscription management
             config: BotConfig
+            strategies: Dict of strategy_name -> strategy for exit dispatch
         """
         self.strategy = strategy
+        self.strategies = strategies or {}
         self.processor = processor
         self.executor = executor
         self.monitor = monitor
@@ -250,8 +253,14 @@ class StreamHandler:
             else SignalDirection.SHORT
         )
 
+        # Dispatch to the correct strategy based on how position was opened
+        strategy_name = getattr(position, "strategy", None)
+        strategy = self.strategies.get(strategy_name) if strategy_name else None
+        if strategy is None:
+            strategy = self.strategy  # fallback to default
+
         try:
-            should_exit, reason = self.strategy.should_exit(
+            should_exit, reason = strategy.should_exit(
                 symbol=symbol,
                 bars=bars_df,
                 entry_price=position.entry_price,

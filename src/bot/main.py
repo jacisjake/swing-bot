@@ -29,6 +29,7 @@ from src.bot.screener import MomentumScreener
 from src.bot.tradingview_screener import TradingViewScreener
 from src.bot.signals.base import Signal
 from src.bot.signals.momentum_pullback import MomentumPullbackStrategy
+from src.bot.signals.momentum_surge import MomentumSurgeStrategy
 from src.bot.state.persistence import BotState
 from src.bot.state.trade_ledger import TradeLedger
 from src.bot.stream_handler import StreamHandler
@@ -113,7 +114,7 @@ class TradingBot:
             history_days=self.config.regime_history_days,
         )
 
-        # Strategy
+        # Strategies
         self.strategy = MomentumPullbackStrategy(
             macd_fast=self.config.macd_fast_period,
             macd_slow=self.config.macd_slow_period,
@@ -123,6 +124,15 @@ class TradingBot:
             pullback_min_candles=self.config.pullback_min_candles,
             pullback_max_candles=self.config.pullback_max_candles,
             pullback_max_retracement=self.config.pullback_max_retracement,
+            risk_reward_target=self.config.risk_reward_target,
+            min_signal_strength=self.config.min_signal_strength,
+        )
+        self.surge_strategy = MomentumSurgeStrategy(
+            macd_fast=self.config.macd_fast_period,
+            macd_slow=self.config.macd_slow_period,
+            macd_signal=self.config.macd_signal_period,
+            atr_period=self.config.atr_period,
+            atr_stop_multiplier=2.0,  # Wider stop for surge entries near HOD
             risk_reward_target=self.config.risk_reward_target,
             min_signal_strength=self.config.min_signal_strength,
         )
@@ -144,7 +154,10 @@ class TradingBot:
         self.monitor = PositionMonitor(
             client=self.client,
             position_manager=self.position_manager,
-            strategies={"momentum_pullback": self.strategy},
+            strategies={
+                "momentum_pullback": self.strategy,
+                "momentum_surge": self.surge_strategy,
+            },
             trading_window_end=self.config.trading_window_end,
         )
 
@@ -167,6 +180,10 @@ class TradingBot:
             client=self.client,
             ws_client=self.ws_client,
             config=self.config,
+            strategies={
+                "momentum_pullback": self.strategy,
+                "momentum_surge": self.surge_strategy,
+            },
         )
 
         # Register WebSocket callbacks
@@ -539,12 +556,15 @@ class TradingBot:
         """
         Generate a signal for a symbol using 5-min bars.
 
+        Tries pullback strategy first (higher quality setup), then
+        falls back to surge strategy (catches initial moves).
+
         Args:
             symbol: Stock ticker
-            has_catalyst: Whether the stock has a news catalyst (boosts signal strength)
+            has_catalyst: Whether the stock has a news catalyst
 
         Returns:
-            Signal if pullback pattern found, None otherwise
+            Signal if entry conditions met, None otherwise
         """
         try:
             bars = self.client.get_bars(
@@ -560,7 +580,16 @@ class TradingBot:
                 return None
 
             current_price = self.client.get_latest_price(symbol)
-            return self.strategy.generate(
+
+            # Try pullback first (higher quality setup)
+            signal = self.strategy.generate(
+                symbol, bars, current_price, has_catalyst=has_catalyst
+            )
+            if signal is not None:
+                return signal
+
+            # Fall back to surge entry (catches initial moves)
+            return self.surge_strategy.generate(
                 symbol, bars, current_price, has_catalyst=has_catalyst
             )
 
