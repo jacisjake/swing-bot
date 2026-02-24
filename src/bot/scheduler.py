@@ -157,16 +157,14 @@ class BotScheduler:
                 replace_existing=True,
             )
 
-            # ── 2. Active scan: 7:00-9:59 AM ET, every 1 minute ─────────
-            # Build hour range for active window
-            active_hours = f"{win_start_h}-{win_end_h - 1}" if win_end_h > win_start_h else str(win_start_h)
-
+            # ── 2. Active scan: market hours, every 5 minutes ─────────
+            # Covers full trading day so we catch new movers anytime
             self.scheduler.add_job(
                 self._run_momentum_scan,
                 CronTrigger(
                     day_of_week="mon-fri",
-                    hour=active_hours,
-                    minute=f"*/{self.config.stock_check_interval_minutes}",
+                    hour="9-15",
+                    minute="*/5",
                     timezone="America/New_York",
                 ),
                 id="active_scan",
@@ -178,26 +176,8 @@ class BotScheduler:
         # Position exits now handled by real-time quote callbacks (StreamHandler.on_quote)
         # Broker state now handled by trade update stream (StreamHandler.on_trade_update)
 
-        # ── 3. End-of-day cleanup: 10:05 AM ET ──────────────────────────
+        # ── 3. Safety net and EOD cleanup ────────────────────────────────
         if self._end_of_day_callback:
-            eod_minute = win_end_m + 5  # 5 minutes after window close
-            eod_hour = win_end_h
-            if eod_minute >= 60:
-                eod_minute -= 60
-                eod_hour += 1
-
-            self.scheduler.add_job(
-                self._run_end_of_day,
-                CronTrigger(
-                    day_of_week="mon-fri",
-                    hour=str(eod_hour),
-                    minute=str(eod_minute),
-                    timezone="America/New_York",
-                ),
-                id="end_of_day",
-                name="End-of-Day Cleanup",
-                replace_existing=True,
-            )
 
             # ── 6. Safety net close-all: 3:55 PM ET ─────────────────────
             self.scheduler.add_job(
