@@ -488,6 +488,19 @@ async def trigger_scan() -> dict:
     return {"status": "ok", "candidates": len(results), "results": results}
 
 
+@app.post("/api/scan/press-releases")
+async def trigger_press_release_scan() -> dict:
+    """Manually trigger a press release scan."""
+    if not _bot:
+        return {"error": "Bot not initialized"}
+
+    from loguru import logger
+    logger.info("[API] Manual press release scan triggered")
+    await _bot._run_press_release_scan()
+    status = _bot.press_release_scanner.get_status()
+    return {"status": "ok", **status}
+
+
 @app.get("/api/regime")
 async def get_regime() -> dict:
     """Get current HMM regime status."""
