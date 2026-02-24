@@ -22,11 +22,13 @@ Data flow:
       6. At 7:00 AM: merge catalyst watchlist with scanner results
 """
 
+import json
 import re
 import time as time_mod
 import xml.etree.ElementTree as ET_XML
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -230,6 +232,8 @@ class PressReleaseScanner:
         lookback_hours: int = 16,
         request_timeout: int = 10,
         trading_client=None,
+        state_path: str = "state/press_releases.json",
+        retention_days: int = 7,
     ):
         """
         Initialize press release scanner.
@@ -240,11 +244,15 @@ class PressReleaseScanner:
             lookback_hours: How far back to look for press releases (16h = covers overnight)
             request_timeout: HTTP request timeout in seconds
             trading_client: TastytradeClient instance for ticker validation
+            state_path: Path to JSON file for rolling persistence
+            retention_days: How many days to keep press releases (default 7)
         """
         self.fmp_api_key = fmp_api_key
         self.rss_feeds = rss_feeds or RSS_FEEDS
         self.lookback_hours = lookback_hours
         self.request_timeout = request_timeout
+        self._state_path = Path(state_path)
+        self._retention_days = retention_days
 
         # Results cache
         self._hits: list[CatalystHit] = []
@@ -259,6 +267,62 @@ class PressReleaseScanner:
         # Rate limiting for RSS feeds
         self._last_feed_fetch: dict[str, float] = {}
         self._min_fetch_interval = 120  # 2 min between same-feed fetches
+
+        # Load persisted state
+        self._load_state()
+
+    def _load_state(self) -> None:
+        """Load persisted press releases from JSON file."""
+        if not self._state_path.exists():
+            return
+        try:
+            with open(self._state_path, "r") as f:
+                data = json.load(f)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=self._retention_days)
+            for item in data.get("hits", []):
+                published = None
+                if item.get("published"):
+                    try:
+                        published = datetime.fromisoformat(item["published"])
+                    except (ValueError, TypeError):
+                        pass
+                # Prune old entries on load
+                if published and published < cutoff:
+                    continue
+                hit = CatalystHit(
+                    symbol=item["symbol"],
+                    headline=item["headline"],
+                    source=item.get("source", "unknown"),
+                    category=item.get("category", "General"),
+                    url=item.get("url", ""),
+                    published=published,
+                    sentiment=item.get("sentiment", "neutral"),
+                    matched_keywords=item.get("matched_keywords", []),
+                )
+                self._hits.append(hit)
+                self._seen_urls.add(hit.url)
+            if self._hits:
+                logger.info(f"[PR-SCAN] Loaded {len(self._hits)} press releases from disk")
+        except Exception as e:
+            logger.error(f"[PR-SCAN] Failed to load state: {e}")
+
+    def _save_state(self) -> None:
+        """Persist press releases to JSON file, pruning old entries."""
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=self._retention_days)
+            hits_to_save = [
+                h for h in self._hits
+                if not h.published or h.published >= cutoff
+            ]
+            data = {
+                "last_scan": self._last_scan_time.isoformat() if self._last_scan_time else None,
+                "hits": [h.to_dict() for h in hits_to_save],
+            }
+            with open(self._state_path, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"[PR-SCAN] Failed to save state: {e}")
 
     def scan(self) -> list[CatalystHit]:
         """
@@ -314,6 +378,7 @@ class PressReleaseScanner:
         else:
             logger.debug("[PR-SCAN] No new press releases with extractable tickers")
 
+        self._save_state()
         return unique_hits
 
     def get_catalyst_symbols(self, positive_only: bool = True) -> list[str]:
@@ -341,12 +406,14 @@ class PressReleaseScanner:
         return [h for h in self._hits if h.symbol == symbol]
 
     def reset_daily(self) -> None:
-        """Reset for a new trading day."""
-        self._hits.clear()
+        """Reset for a new trading day (clears dedup cache, keeps persisted history)."""
         self._seen_urls.clear()
         self._us_ticker_cache.clear()
         self._last_scan_time = None
-        logger.info("[PR-SCAN] Daily reset — cleared all catalyst hits")
+        # Reload from disk (retains rolling history, prunes old entries)
+        self._hits.clear()
+        self._load_state()
+        logger.info(f"[PR-SCAN] Daily reset — reloaded {len(self._hits)} persisted hits")
 
     # ── RSS Feed Parsing ──────────────────────────────────────────────────
 
