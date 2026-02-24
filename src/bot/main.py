@@ -505,11 +505,6 @@ class TradingBot:
         candidate_symbols = [c.symbol for c in candidates]
         await self.stream_handler.update_watchlist(candidate_symbols)
 
-        # Only generate signals during active trading window (not premarket)
-        if not self.scheduler.is_in_trading_window():
-            logger.info("[SCAN] Pre-market only -- signals deferred until trading window")
-            return
-
         # For each candidate, try to generate a signal
         for candidate in candidates:
             symbol = candidate.symbol
