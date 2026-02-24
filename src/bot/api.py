@@ -1163,7 +1163,7 @@ DASHBOARD_HTML = """
             </table>
         </div>
 
-        <p class="refresh-note">Auto-refreshes every 30 seconds</p>
+        <p class="refresh-note">Auto-refreshes every 60 seconds</p>
     </div>
 
     <div class="modal-overlay" id="chart-modal">
@@ -1465,7 +1465,7 @@ DASHBOARD_HTML = """
         fetchData();
 
         // Refresh data every 30s, sparklines every 60s (less frequent - more expensive)
-        setInterval(fetchData, 30000);
+        setInterval(fetchData, 60000);
         setInterval(fetchSparklines, 60000);
 
         // Chart functionality
