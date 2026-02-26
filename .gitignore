@@ -54,9 +54,9 @@ data/*.json
 data/*.csv
 !data/.gitkeep
 
-# Bot state (runtime)
-state/
-!state/.gitkeep
+# Bot state (runtime data)
+/state/
+!/state/.gitkeep
 
 # OS
 .DS_Store
