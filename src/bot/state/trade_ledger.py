@@ -29,6 +29,7 @@ class TradeRecord:
     exit_reason: str
     fees: float = 0.0
     hold_duration_hours: float = 0.0
+    strategy: str = ""
 
 
 class TradeLedger:
@@ -130,6 +131,7 @@ class TradeLedger:
             exit_reason=position.exit_reason or "unknown",
             fees=fees,
             hold_duration_hours=position.hold_duration or 0.0,
+            strategy=position.strategy or "",
         )
 
         self.trades.append(trade)

@@ -129,6 +129,7 @@ class TradeExecutor:
                 stop_loss=trade_params.stop_price,
                 take_profit=trade_params.target_price,
                 trailing_stop_pct=trailing_stop_pct,
+                strategy=trade_params.signal.strategy,
             )
 
             return ExecutionResult(

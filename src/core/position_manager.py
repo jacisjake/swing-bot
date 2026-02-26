@@ -37,6 +37,7 @@ class Position:
     initial_stop_loss: Optional[float] = None  # Immutable record of original stop
     take_profit: Optional[float] = None
     trailing_stop_pct: Optional[float] = None
+    strategy: Optional[str] = None  # Which strategy triggered the entry
 
     def __post_init__(self):
         """Set initial_stop_loss from stop_loss if not explicitly provided."""
@@ -318,6 +319,7 @@ class PositionManager:
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
         trailing_stop_pct: Optional[float] = None,
+        strategy: Optional[str] = None,
     ) -> Position:
         """
         Record a new position.
@@ -336,6 +338,7 @@ class PositionManager:
             stop_loss=stop_loss,
             take_profit=take_profit,
             trailing_stop_pct=trailing_stop_pct,
+            strategy=strategy,
             current_price=entry_price,
             highest_price=entry_price,
             lowest_price=entry_price,

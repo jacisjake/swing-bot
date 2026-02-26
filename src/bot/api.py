@@ -204,6 +204,7 @@ async def get_positions() -> list[dict]:
                 "fees": fees,
                 "net_proceeds": net_proceeds,
                 "net_pnl": net_pnl,
+                "strategy": live_pos.strategy if live_pos and live_pos.strategy else "",
             })
         return results
     except Exception as e:
@@ -1504,6 +1505,12 @@ DASHBOARD_HTML = """
         // Chart functionality
         let candleChart = null;
         let macdChart = null;
+        let candleSeries = null;
+        let macdLine = null;
+        let signalLine = null;
+        let histogramSeries = null;
+        let chartRefreshInterval = null;
+        const CHART_REFRESH_MS = 30000; // 30 seconds
         let currentWatchlistData = { stocks: [], crypto: [] };
         let currentPositionsData = [];
         let currentChartSymbol = null;
@@ -1541,9 +1548,27 @@ DASHBOARD_HTML = """
             setTimeout(() => { toggle._userClicked = false; fetchData(); }, 500);
         }
 
+        async function refreshChartData(symbol) {
+            // Fetch latest bars and update series in-place (no chart rebuild)
+            try {
+                const data = await fetch(`api/bars/${symbol}?timeframe=5Min&limit=100`).then(r => r.json());
+                if (data.error || !candleSeries) return;
+                candleSeries.setData(data.candles);
+                if (macdLine) macdLine.setData(data.macd.map(d => ({ time: d.time, value: d.macd })));
+                if (signalLine) signalLine.setData(data.macd.map(d => ({ time: d.time, value: d.signal })));
+                if (histogramSeries) histogramSeries.setData(data.macd.map(d => ({
+                    time: d.time, value: d.histogram,
+                    color: d.histogram >= 0 ? '#3fb950' : '#f85149',
+                })));
+            } catch (e) { /* silent refresh failure */ }
+        }
+
         async function showChart(symbol) {
             document.getElementById('chart-modal').classList.add('active');
             document.getElementById('chart-title').textContent = symbol + ' - Loading...';
+
+            // Stop any existing refresh
+            if (chartRefreshInterval) { clearInterval(chartRefreshInterval); chartRefreshInterval = null; }
 
             currentChartSymbol = symbol;
             currentSymbolIndex = currentWatchlistData.stocks.findIndex(item => item.symbol === symbol);
@@ -1573,7 +1598,7 @@ DASHBOARD_HTML = """
                 // Update title with company name
                 const companyName = assetInfo.name || symbol;
                 const exchange = assetInfo.exchange ? ` (${assetInfo.exchange})` : '';
-                document.getElementById('chart-title').innerHTML = `<strong>${symbol}</strong> - ${companyName}${exchange} <span style="color:#8b949e;font-size:12px">5Min</span>`;
+                document.getElementById('chart-title').innerHTML = `<strong>${symbol}</strong> - ${companyName}${exchange} <span style="color:#8b949e;font-size:12px">5Min | auto-refresh 30s</span>`;
                 if (data.error) {
                     document.getElementById('chart-container').innerHTML = `<p style="padding:20px;color:#f85149">${data.error}</p>`;
                     return;
@@ -1590,7 +1615,7 @@ DASHBOARD_HTML = """
                     height: 400,
                     timeScale: { timeVisible: true, secondsVisible: false },
                 });
-                const candleSeries = candleChart.addCandlestickSeries({
+                candleSeries = candleChart.addCandlestickSeries({
                     upColor: '#3fb950', downColor: '#f85149',
                     borderUpColor: '#3fb950', borderDownColor: '#f85149',
                     wickUpColor: '#3fb950', wickDownColor: '#f85149',
@@ -1620,19 +1645,19 @@ DASHBOARD_HTML = """
                 });
 
                 // MACD line (blue)
-                const macdLine = macdChart.addLineSeries({ color: '#58a6ff', lineWidth: 1 });
+                macdLine = macdChart.addLineSeries({ color: '#58a6ff', lineWidth: 1 });
                 macdLine.setData(data.macd.map(d => ({ time: d.time, value: d.macd })));
 
                 // Signal line (orange)
-                const signalLine = macdChart.addLineSeries({ color: '#d29922', lineWidth: 1 });
+                signalLine = macdChart.addLineSeries({ color: '#d29922', lineWidth: 1 });
                 signalLine.setData(data.macd.map(d => ({ time: d.time, value: d.signal })));
 
                 // Histogram (green/red bars)
-                const histogram = macdChart.addHistogramSeries({
+                histogramSeries = macdChart.addHistogramSeries({
                     color: '#3fb950',
                     priceFormat: { type: 'price' },
                 });
-                histogram.setData(data.macd.map(d => ({
+                histogramSeries.setData(data.macd.map(d => ({
                     time: d.time,
                     value: d.histogram,
                     color: d.histogram >= 0 ? '#3fb950' : '#f85149',
@@ -1648,6 +1673,9 @@ DASHBOARD_HTML = """
                     if (range) macdChart.timeScale().setVisibleRange(range);
                 });
 
+                // Start auto-refresh
+                chartRefreshInterval = setInterval(() => refreshChartData(symbol), CHART_REFRESH_MS);
+
             } catch (e) {
                 document.getElementById('chart-container').innerHTML = `<p style="padding:20px;color:#f85149">Error: ${e}</p>`;
             }
@@ -1655,8 +1683,10 @@ DASHBOARD_HTML = """
 
         function closeChart() {
             document.getElementById('chart-modal').classList.remove('active');
+            if (chartRefreshInterval) { clearInterval(chartRefreshInterval); chartRefreshInterval = null; }
             if (candleChart) { candleChart.remove(); candleChart = null; }
             if (macdChart) { macdChart.remove(); macdChart = null; }
+            candleSeries = null; macdLine = null; signalLine = null; histogramSeries = null;
             currentChartSymbol = null;
             currentWatchlist = null;
             currentSymbolIndex = -1;
