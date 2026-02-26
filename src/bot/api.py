@@ -227,6 +227,7 @@ async def get_watchlists() -> dict:
             "float_millions": c.float_shares / 1e6 if c.float_shares else None,
             "has_catalyst": c.has_catalyst,
             "news_headline": c.news_headline,
+            "news_url": c.news_url,
             "news_count": c.news_count,
         }
         for c in _bot._scanner_results
@@ -295,6 +296,7 @@ async def get_scanner_results() -> list[dict]:
                 "high_of_day": c.high_of_day,
                 "has_catalyst": c.has_catalyst,
                 "news_headline": c.news_headline,
+                "news_url": c.news_url,
                 "news_count": c.news_count,
                 "news_source": c.news_source,
                 "passes_all": c.passes_all_filters,
@@ -1413,8 +1415,11 @@ DASHBOARD_HTML = """
                         const colorClass = item.change > 0 ? 'positive' : (item.change < 0 ? 'negative' : 'neutral');
                         const sparkline = sparklineSvg(sparklines[item.symbol], color);
                         const headline = (item.news_headline || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+                        const newsUrl = item.news_url || '';
                         const catalystBadge = item.has_catalyst
-                            ? `<span style="background:#d2992222;color:#d29922;padding:2px 6px;border-radius:3px;font-size:10px;cursor:help" title="${headline}">NEWS (${item.news_count})</span>`
+                            ? (newsUrl
+                                ? `<a href="${newsUrl}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="background:#d2992222;color:#d29922;padding:2px 6px;border-radius:3px;font-size:10px;text-decoration:none;cursor:pointer" title="${headline}">NEWS (${item.news_count})</a>`
+                                : `<span style="background:#d2992222;color:#d29922;padding:2px 6px;border-radius:3px;font-size:10px;cursor:help" title="${headline}">NEWS (${item.news_count})</span>`)
                             : '<span class="neutral" style="font-size:10px">--</span>';
 
                         return `

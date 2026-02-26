@@ -482,6 +482,7 @@ class TradingBot:
                     if not candidate.has_catalyst:
                         candidate.has_catalyst = True
                         candidate.news_headline = best_hit.headline
+                        candidate.news_url = best_hit.url
                         candidate.news_source = f"{best_hit.source} (PR)"
                         candidate.news_count = len(pr_hits)
                     else:

@@ -63,6 +63,7 @@ class MomentumCandidate(ScreenerResult):
     # Catalyst / news data (5th pillar)
     has_catalyst: bool = False                    # Whether recent news found
     news_headline: Optional[str] = None           # Top headline (if any)
+    news_url: Optional[str] = None                # Link to top headline
     news_count: int = 0                           # Number of recent articles
     news_source: Optional[str] = None             # Source of top headline
     passes_all_filters: bool = False
@@ -87,6 +88,7 @@ class MomentumCandidate(ScreenerResult):
             "prev_close": self.prev_close,
             "has_catalyst": self.has_catalyst,
             "news_headline": self.news_headline,
+            "news_url": self.news_url,
             "news_count": self.news_count,
             "news_source": self.news_source,
             "passes_all_filters": self.passes_all_filters,
@@ -150,7 +152,7 @@ class MomentumScreener:
         min_float_millions: float = 0.5,
         enable_float_filter: bool = True,
         top_n: int = 20,
-        max_results: int = 5,
+        max_results: int = 10,
     ) -> list[MomentumCandidate]:
         """
         Run the full momentum scan pipeline.
@@ -412,6 +414,7 @@ class MomentumScreener:
             # Fetch news/catalyst data (5th pillar)
             has_catalyst = False
             news_headline = None
+            news_url = None
             news_count = 0
             news_source = None
 
@@ -426,6 +429,7 @@ class MomentumScreener:
                     has_catalyst = news_count > 0
                     if articles:
                         news_headline = articles[0].get("headline", "")
+                        news_url = articles[0].get("url", "")
                         news_source = articles[0].get("source", "")
                 except Exception as e:
                     logger.debug(f"[SCANNER] News fetch failed for {symbol}: {e}")
@@ -445,6 +449,7 @@ class MomentumScreener:
                 prev_close=prev_close,
                 has_catalyst=has_catalyst,
                 news_headline=news_headline,
+                news_url=news_url,
                 news_count=news_count,
                 news_source=news_source,
                 source="momentum_scanner",
