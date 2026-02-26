@@ -906,16 +906,23 @@ class TastytradeClient:
     # Trade Stats
     # =========================================================================
 
-    def get_trade_stats(self) -> dict:
+    def get_trade_stats(self, since: str = "2026-02-24") -> dict:
         """
         Calculate trading stats from tastytrade transaction history.
 
         Matches buy/sell transactions by symbol to calculate realized P&L.
+
+        Args:
+            since: Only include transactions on or after this date (YYYY-MM-DD).
+                   Defaults to 2026-02-24 (experiment tracking start).
         """
         try:
+            params = {"per-page": 500}
+            if since:
+                params["start-date"] = since
             data = self._get(
                 f"/accounts/{self._acct}/transactions",
-                params={"per-page": 500},
+                params=params,
             )["data"]
             items = data.get("items", []) if isinstance(data, dict) else data
         except Exception as e:
@@ -935,6 +942,10 @@ class TastytradeClient:
             qty = abs(float(txn.get("quantity", 0)))
             price = abs(float(txn.get("price", 0)))
             txn_time = txn.get("executed-at", txn.get("transaction-date", ""))
+
+            # Client-side date filter as safety net
+            if since and txn_time and txn_time[:10] < since:
+                continue
 
             if qty <= 0 or price <= 0:
                 continue
@@ -980,6 +991,7 @@ class TastytradeClient:
                         "exit_price": order["price"],
                         "pnl": pnl,
                         "pnl_pct": (pnl / sell_cost * 100) if sell_cost > 0 else 0,
+                        "exit_time": order["time"],
                     })
 
                     cost_basis -= sell_qty * avg_cost
