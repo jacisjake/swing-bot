@@ -97,9 +97,9 @@ async def get_status() -> dict:
         last_sync = last_sync_dt.isoformat() if last_sync_dt else None
 
         # Experiment tracking: use actual broker equity
-        # $400 = 0% progress, $4000 = 100% progress
-        starting_capital = 400.0
-        goal = 4000.0
+        # $250 = 0% progress, $25000 = 100% progress
+        starting_capital = 250.0
+        goal = 25000.0
         total_pnl = equity - starting_capital  # Actual P&L from broker equity
         progress_pct = ((equity - starting_capital) / (goal - starting_capital)) * 100
 
@@ -162,24 +162,41 @@ async def get_positions() -> list[dict]:
         positions = _bot.client.get_positions()
         results = []
         for p in positions:
+            symbol = p["symbol"]
             is_crypto = p["asset_class"] == "crypto"
-            market_value = p["market_value"]
+            qty = p["qty"]
+
+            # Prefer real-time streaming price from position manager
+            # (broker REST close-price is often previous day's close)
+            current_price = p["current_price"]
+            live_pos = _bot.position_manager.get_position(symbol)
+            if live_pos and live_pos.current_price > 0:
+                current_price = live_pos.current_price
+
+            cost_basis = qty * p["avg_entry_price"]
+            market_value = qty * current_price
+
+            if p["side"] == "long":
+                unrealized_pl = market_value - cost_basis
+            else:
+                unrealized_pl = cost_basis - market_value
+            unrealized_plpc = (unrealized_pl / cost_basis) if cost_basis > 0 else 0
 
             # Estimate fees for net P&L display
             fee_rate = 0.0025 if is_crypto else 0.0
             fees = market_value * fee_rate
             net_proceeds = market_value - fees
-            net_pnl = net_proceeds - p["cost_basis"]
+            net_pnl = net_proceeds - cost_basis
 
             results.append({
-                "symbol": p["symbol"],
+                "symbol": symbol,
                 "side": p["side"],
-                "qty": p["qty"],
+                "qty": qty,
                 "entry_price": p["avg_entry_price"],
-                "current_price": p["current_price"],
-                "unrealized_pnl": p["unrealized_pl"],
-                "unrealized_pnl_pct": p["unrealized_plpc"] * 100,
-                "cost_basis": p["cost_basis"],
+                "current_price": current_price,
+                "unrealized_pnl": unrealized_pl,
+                "unrealized_pnl_pct": unrealized_plpc * 100,
+                "cost_basis": cost_basis,
                 "market_value": market_value,
                 "is_crypto": is_crypto,
                 "fees": fees,
@@ -385,8 +402,8 @@ async def get_trade_ledger(limit: int = 50) -> dict:
         # Get current equity for experiment progress
         account = _bot.client.get_account()
         equity = float(account.get("equity", 0))
-        starting_capital = 400.0
-        goal = 4000.0
+        starting_capital = 250.0
+        goal = 25000.0
 
         return {
             "trades": stats.get("trades", []),
@@ -1265,10 +1282,10 @@ DASHBOARD_HTML = """
                     wsIndicator.innerHTML = `DXLink &#x25CF; Disconnected`;
                 }
 
-                // Progress toward goal ($400 = 0%, $4000 = 100%)
-                const currentVal = status.current_value || status.equity || 400;
-                const goal = status.goal || 4000;
-                const startingCapital = status.starting_capital || 400;
+                // Progress toward goal ($250 = 0%, $25000 = 100%)
+                const currentVal = status.current_value || status.equity || 250;
+                const goal = status.goal || 25000;
+                const startingCapital = status.starting_capital || 250;
                 const progressPct = status.progress_pct || 0;
 
                 // Show current value with color based on P&L
