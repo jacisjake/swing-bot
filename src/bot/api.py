@@ -124,6 +124,8 @@ async def get_status() -> dict:
             "remaining": goal - equity,
             # Stats
             "total_trades": stats["total_trades"],
+            "win_count": stats["win_count"],
+            "loss_count": stats["loss_count"],
             "win_rate": stats["win_rate"],
             "position_count": len(positions),
             # Day trading
@@ -1089,6 +1091,11 @@ DASHBOARD_HTML = """
                 <div class="card-subtitle" id="pnl-breakdown">--</div>
             </div>
             <div class="card">
+                <div class="card-title">Win / Loss</div>
+                <div class="card-value" id="win-loss">--</div>
+                <div class="card-subtitle" id="win-loss-detail">--</div>
+            </div>
+            <div class="card">
                 <div class="card-title">Today</div>
                 <div class="card-value" id="trades-today">--</div>
                 <div class="card-subtitle" id="scanner-info">--</div>
@@ -1316,16 +1323,25 @@ DASHBOARD_HTML = """
                 document.getElementById('total-pnl').innerHTML = formatPnl(totalPnl, totalPnlPct);
                 document.getElementById('pnl-breakdown').innerHTML = `Realized: ${formatPnl(realizedPnl, 0).replace(/\(.*\)/, '')} | Open: ${formatPnl(unrealizedPnl, 0).replace(/\(.*\)/, '')}`;
 
-                // Trades today + scanner info
-                const tradesToday = status.trades_today || 0;
-                const maxDaily = status.max_daily_trades || 1;
-                const scannerHits = status.scanner_hits || 0;
+                // Win/Loss record
+                const winCount = status.win_count || 0;
+                const lossCount = status.loss_count || 0;
                 const winRate = status.win_rate || 0;
                 const totalTrades = status.total_trades || 0;
+                const wlClass = winCount >= lossCount ? 'positive' : 'negative';
+                document.getElementById('win-loss').innerHTML =
+                    `<span class="${wlClass}">${winCount}W - ${lossCount}L</span>`;
+                document.getElementById('win-loss-detail').innerHTML =
+                    `${winRate.toFixed(0)}% win rate (${totalTrades} trades)`;
+
+                // Trades today + scanner info
+                const tradesToday = status.trades_today || 0;
+                const maxDaily = status.max_daily_trades || 10;
+                const scannerHits = status.scanner_hits || 0;
                 document.getElementById('trades-today').innerHTML =
                     `${tradesToday}/${maxDaily} trades`;
                 document.getElementById('scanner-info').innerHTML =
-                    `${scannerHits} scanner hits | ${winRate.toFixed(0)}% win rate (${totalTrades} total)`;
+                    `${scannerHits} scanner hits`;
 
                 // Trading window status
                 const windowEl = document.getElementById('trading-window');
