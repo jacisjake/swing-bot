@@ -539,11 +539,9 @@ class TradingBot:
             )
 
             if executed:
-                # Success! Record trade and stop scanning
                 self._daily_trades_today += 1
                 self.portfolio_limits.record_entry()
                 logger.info(f"[TRADE] Trade #{self._daily_trades_today} executed for {symbol}")
-                return  # One trade per day
 
     async def _generate_signal(
         self, symbol: str, has_catalyst: bool = False

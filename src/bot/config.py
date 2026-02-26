@@ -262,10 +262,10 @@ class BotConfig(Settings):
     # ── Day Trading Risk Management ─────────────────────────────────────
 
     max_daily_trades: int = Field(
-        default=1,
+        default=10,
         ge=1,
-        le=5,
-        description="Maximum trades per day (1 = Ross Cameron's cash account approach)",
+        le=50,
+        description="Maximum trades per day",
     )
     daily_profit_target_pct: float = Field(
         default=0.10,
