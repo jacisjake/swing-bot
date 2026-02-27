@@ -882,21 +882,6 @@ DASHBOARD_HTML = """
             font-weight: 700;
             font-size: 14px;
         }
-        .sidebar-divider {
-            width: 40px;
-            height: 1px;
-            background: #333;
-        }
-        .sidebar-icon {
-            width: 24px;
-            height: 24px;
-            color: #6B7280;
-            cursor: pointer;
-            transition: color 0.2s;
-        }
-        .sidebar-icon:hover, .sidebar-icon.active {
-            color: var(--text-inverse);
-        }
         /* Main content */
         .main {
             flex: 1;
@@ -1024,8 +1009,7 @@ DASHBOARD_HTML = """
         .content-row {
             display: flex;
             gap: 16px;
-            flex: 1;
-            min-height: 0;
+            min-height: 300px;
         }
         @media (max-width: 900px) { .content-row { flex-direction: column; } }
         /* Section panels */
@@ -1063,10 +1047,12 @@ DASHBOARD_HTML = """
         }
         .positions-section {
             flex: 1;
+            min-height: 200px;
         }
         .scanner-section {
             width: 360px;
             flex-shrink: 0;
+            min-height: 200px;
         }
         @media (max-width: 900px) { .scanner-section { width: 100%; } }
         /* Tables */
@@ -1085,8 +1071,8 @@ DASHBOARD_HTML = """
             font-size: 13px;
             border-bottom: 1px solid var(--border-light);
         }
-        tr { cursor: pointer; transition: background 0.15s; }
-        tr:hover { background: var(--border-light); }
+        tbody tr { cursor: pointer; transition: background 0.15s; }
+        tbody tr:hover { background: var(--border-light); }
         .symbol-cell { font-weight: 600; }
         .side-badge {
             display: inline-block;
@@ -1258,11 +1244,6 @@ DASHBOARD_HTML = """
 <body>
     <nav class="sidebar">
         <div class="sidebar-logo">ST</div>
-        <div class="sidebar-divider"></div>
-        <svg class="sidebar-icon active" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-        <svg class="sidebar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
-        <svg class="sidebar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <svg class="sidebar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/></svg>
     </nav>
 
     <div class="main">
@@ -1691,7 +1672,7 @@ DASHBOARD_HTML = """
                 if (signalLine) signalLine.setData(data.macd.map(d => ({ time: d.time, value: d.signal })));
                 if (histogramSeries) histogramSeries.setData(data.macd.map(d => ({
                     time: d.time, value: d.histogram,
-                    color: d.histogram >= 0 ? 'var(--success)' : 'var(--accent)',
+                    color: d.histogram >= 0 ? '#16A34A' : '#DC2626',
                 })));
             } catch (e) { /* silent */ }
         }
