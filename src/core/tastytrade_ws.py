@@ -57,9 +57,16 @@ class TastytradeWSClient:
         self._trade_connected = False
         self._shutting_down = False
 
-        # Current subscriptions
+        # Desired subscriptions (survives reconnects)
         self._subscribed_bars: set[str] = set()
         self._subscribed_quotes: set[str] = set()
+        # Actually active on current connection (cleared on reconnect)
+        self._active_bars: set[str] = set()
+        self._active_quotes: set[str] = set()
+
+        # Active listener tasks (for cancellation on reconnect)
+        self._candle_task: Optional[asyncio.Task] = None
+        self._quote_task: Optional[asyncio.Task] = None
 
         # Callbacks
         self._on_bar: Optional[Callable] = None
@@ -135,34 +142,46 @@ class TastytradeWSClient:
         Bars use DXLink Candle events with 5-min period.
         Quotes use DXLink Quote events.
         """
-        if not self._streamer or not self._data_connected:
-            logger.warning("[WS:DATA] Cannot subscribe — not connected")
-            return
-
         from tastytrade.dxfeed import Quote
 
+        # Always track desired state so reconnect resubscribes everything
         if bars:
-            new_bars = set(bars) - self._subscribed_bars
+            self._subscribed_bars.update(bars)
+        if quotes:
+            self._subscribed_quotes.update(quotes)
+
+        if not self._streamer or not self._data_connected:
+            logger.info(
+                "[WS:DATA] Not connected — subscriptions queued for reconnect: "
+                f"bars={sorted(self._subscribed_bars)}, "
+                f"quotes={sorted(self._subscribed_quotes)}"
+            )
+            return
+
+        needs_reconnect = False
+
+        if bars:
+            new_bars = set(bars) - self._active_bars
             if new_bars:
                 try:
-                    # subscribe_candle requires a start_time; use 1 hour ago
-                    # to get a small backfill of recent candles
                     start = datetime.now(timezone.utc) - timedelta(hours=1)
                     await self._streamer.subscribe_candle(
                         list(new_bars), interval="5m", start_time=start
                     )
-                    self._subscribed_bars.update(new_bars)
+                    self._active_bars.update(new_bars)
                 except Exception as e:
                     logger.error(f"[WS:DATA] Candle subscribe failed: {e}")
+                    needs_reconnect = True
 
         if quotes:
-            new_quotes = set(quotes) - self._subscribed_quotes
+            new_quotes = set(quotes) - self._active_quotes
             if new_quotes:
                 try:
                     await self._streamer.subscribe(Quote, list(new_quotes))
-                    self._subscribed_quotes.update(new_quotes)
+                    self._active_quotes.update(new_quotes)
                 except Exception as e:
                     logger.error(f"[WS:DATA] Quote subscribe failed: {e}")
+                    needs_reconnect = True
 
         if bars or quotes:
             logger.info(
@@ -171,6 +190,13 @@ class TastytradeWSClient:
                 f"quotes={sorted(self._subscribed_quotes)}"
             )
 
+        if needs_reconnect:
+            logger.warning(
+                "[WS:DATA] Connection broken, triggering reconnect "
+                "to pick up new subscriptions"
+            )
+            self._trigger_reconnect()
+
     async def unsubscribe(
         self,
         bars: Optional[list[str]] = None,
@@ -178,29 +204,35 @@ class TastytradeWSClient:
         **kwargs,
     ) -> None:
         """Unsubscribe from symbols."""
+        # Always update desired state
+        if bars:
+            self._subscribed_bars -= set(bars)
+        if quotes:
+            self._subscribed_quotes -= set(quotes)
+
         if not self._streamer or not self._data_connected:
             return
 
         from tastytrade.dxfeed import Quote
 
         if bars:
-            remove = set(bars) & self._subscribed_bars
+            remove = set(bars) & self._active_bars
             if remove:
                 for sym in remove:
                     try:
                         await self._streamer.unsubscribe_candle(sym, interval="5m")
                     except Exception:
                         pass
-                self._subscribed_bars -= remove
+                self._active_bars -= remove
 
         if quotes:
-            remove = set(quotes) & self._subscribed_quotes
+            remove = set(quotes) & self._active_quotes
             if remove:
                 try:
                     await self._streamer.unsubscribe(Quote, list(remove))
                 except Exception:
                     pass
-                self._subscribed_quotes -= remove
+                self._active_quotes -= remove
 
     async def update_subscriptions(
         self,
@@ -253,7 +285,7 @@ class TastytradeWSClient:
                         await asyncio.sleep(min(backoff, self._reconnect_max))
                         backoff *= 2
                         continue
-                    # Resubscribe after reconnect
+                    # Resubscribe all desired symbols after reconnect
                     if self._subscribed_bars:
                         start = datetime.now(timezone.utc) - timedelta(hours=1)
                         await self._streamer.subscribe_candle(
@@ -261,24 +293,30 @@ class TastytradeWSClient:
                             interval="5m",
                             start_time=start,
                         )
+                        self._active_bars = set(self._subscribed_bars)
                     if self._subscribed_quotes:
                         await self._streamer.subscribe(
                             Quote, list(self._subscribed_quotes)
                         )
-                    logger.info("[WS:DATA] Resubscribed after reconnect")
+                        self._active_quotes = set(self._subscribed_quotes)
+                    logger.info(
+                        f"[WS:DATA] Resubscribed after reconnect: "
+                        f"{len(self._subscribed_bars)} bars, "
+                        f"{len(self._subscribed_quotes)} quotes"
+                    )
                     backoff = 1
 
                 # Listen for both candle and quote events concurrently
-                candle_task = asyncio.create_task(
+                self._candle_task = asyncio.create_task(
                     self._listen_candles()
                 )
-                quote_task = asyncio.create_task(
+                self._quote_task = asyncio.create_task(
                     self._listen_quotes()
                 )
 
                 # Wait for either to complete (which means error/disconnect)
                 done, pending = await asyncio.wait(
-                    [candle_task, quote_task],
+                    [self._candle_task, self._quote_task],
                     return_when=asyncio.FIRST_EXCEPTION,
                 )
 
@@ -289,6 +327,8 @@ class TastytradeWSClient:
                         await task
                     except (asyncio.CancelledError, Exception):
                         pass
+                self._candle_task = None
+                self._quote_task = None
 
                 # Check for exceptions
                 for task in done:
@@ -298,11 +338,11 @@ class TastytradeWSClient:
             except asyncio.CancelledError:
                 if self._shutting_down:
                     break
-                # CancelledError from SDK cancel scope — treat as disconnect
-                logger.warning("[WS:DATA] Cancelled by SDK cancel scope, reconnecting...")
+                # CancelledError from _trigger_reconnect or SDK cancel scope
+                logger.warning("[WS:DATA] Listeners cancelled, reconnecting...")
                 self._force_reset_streamer()
-                await asyncio.sleep(min(backoff, self._reconnect_max))
-                backoff *= 2
+                await asyncio.sleep(1)  # Brief pause before reconnect
+                backoff = 1  # Reset backoff — this is an intentional reconnect
             except BaseException as e:
                 # Catch BaseException to handle BaseExceptionGroup from anyio
                 # and RuntimeError from async generator cleanup
@@ -313,6 +353,20 @@ class TastytradeWSClient:
                 await asyncio.sleep(min(backoff, self._reconnect_max))
                 backoff = min(backoff * 2, self._reconnect_max)
 
+    def _trigger_reconnect(self) -> None:
+        """
+        Trigger a reconnect by cancelling the active listener tasks.
+
+        This causes run_data_loop's asyncio.wait to complete, which then
+        goes through the reconnect path and resubscribes everything.
+        Preserves subscription sets so all symbols get resubscribed.
+        """
+        self._data_connected = False
+        for task in (self._candle_task, self._quote_task):
+            if task and not task.done():
+                task.cancel()
+        logger.info("[WS:DATA] Reconnect triggered, cancelling listeners")
+
     def _force_reset_streamer(self) -> None:
         """
         Force-reset streamer state after a crash.
@@ -321,16 +375,22 @@ class TastytradeWSClient:
         the keepalive timeout fires (RuntimeError from cancel scopes).
         Just null everything out and let GC collect it.
         Also resets the SDK session so reconnect gets a fresh one.
-        Clears subscription sets so symbols get re-subscribed on reconnect.
+        Preserves subscription sets so all symbols get resubscribed.
         """
         self._data_connected = False
         self._streamer = None
+        self._candle_task = None
+        self._quote_task = None
+        # Clear active tracking — desired sets preserved for resubscribe
+        self._active_bars.clear()
+        self._active_quotes.clear()
         # Force a fresh SDK session on next connect (old one is tainted)
         self._client._sdk_session = None
-        # Clear subscription tracking so reconnect re-subscribes everything
-        self._subscribed_bars.clear()
-        self._subscribed_quotes.clear()
-        logger.info("[WS:DATA] Streamer force-reset for reconnect")
+        logger.info(
+            f"[WS:DATA] Streamer force-reset for reconnect "
+            f"(preserving {len(self._subscribed_bars)} bar + "
+            f"{len(self._subscribed_quotes)} quote subscriptions)"
+        )
 
     async def _listen_candles(self) -> None:
         """Listen for DXLink candle events and dispatch to callback."""
