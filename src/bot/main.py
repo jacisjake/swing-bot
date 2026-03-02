@@ -284,7 +284,10 @@ class TradingBot:
         for job in self.scheduler.get_jobs():
             logger.info(f"  - {job['name']}: next run {job['next_run']}")
 
-        # 6. Run DXLink loops as independent tasks
+        # 6. Immediate scan on startup (don't wait for next cron tick)
+        asyncio.create_task(self._run_momentum_scan())
+
+        # 7. Run DXLink loops as independent tasks
         # NOT asyncio.gather — the SDK's anyio cancel scopes leak CancelledError
         # which would cancel ALL tasks in a gather. Independent tasks are isolated.
         data_task = asyncio.create_task(self._resilient_data_loop())
