@@ -62,16 +62,10 @@ class BotScheduler:
         # Track state
         self._is_running = False
 
-        # Parse trading window times from config
+        # Always trade all day: scan 6 AM - 4 PM, safety net at 3:55 PM
         self._premarket_start = self._parse_time(config.premarket_scan_start)
-        if config.full_day_trading:
-            # Full day: scan from premarket start, trade 9:30 AM - 3:55 PM ET
-            self._window_start = time(9, 30)
-            self._window_end = time(15, 55)
-            logger.info("[SCHEDULER] Full day trading mode: 9:30 AM - 3:55 PM ET")
-        else:
-            self._window_start = self._parse_time(config.trading_window_start)
-            self._window_end = self._parse_time(config.trading_window_end)
+        self._window_start = time(6, 0)
+        self._window_end = time(15, 55)
 
     @staticmethod
     def _parse_time(time_str: str) -> time:
@@ -142,33 +136,19 @@ class BotScheduler:
                 replace_existing=True,
             )
 
-        # ── 1. Pre-market scan: 6:00-6:59 AM ET, every 5 minutes ────────
+        # ── 1. Momentum scan: 6 AM - 3:55 PM ET, every 5 minutes ──────
+        # Continuous scanning all day — no trading window restriction
         if self._momentum_scan_callback:
             self.scheduler.add_job(
                 self._run_momentum_scan,
                 CronTrigger(
                     day_of_week="mon-fri",
-                    hour=str(pre_h),
-                    minute=f"{pre_m}-59/5",
-                    timezone="America/New_York",
-                ),
-                id="premarket_scan",
-                name="Pre-Market Momentum Scan",
-                replace_existing=True,
-            )
-
-            # ── 2. Active scan: market hours, every 5 minutes ─────────
-            # Covers full trading day so we catch new movers anytime
-            self.scheduler.add_job(
-                self._run_momentum_scan,
-                CronTrigger(
-                    day_of_week="mon-fri",
-                    hour="9-15",
+                    hour="6-15",
                     minute="*/5",
                     timezone="America/New_York",
                 ),
-                id="active_scan",
-                name="Active Momentum Scan",
+                id="momentum_scan",
+                name="Momentum Scan (6AM-4PM)",
                 replace_existing=True,
             )
 
@@ -384,8 +364,7 @@ class BotScheduler:
             self._is_running = True
             logger.info(
                 f"Scheduler started | "
-                f"Premarket: {self.config.premarket_scan_start} ET | "
-                f"Trading: {self.config.trading_window_start}-{self.config.trading_window_end} ET | "
+                f"Scanning: 6:00 AM - 4:00 PM ET (every 5 min) | "
                 f"Monitor: every {self.config.position_monitor_interval_seconds}s"
             )
 

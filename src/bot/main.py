@@ -219,12 +219,10 @@ class TradingBot:
             await self._shutdown_event.wait()
             return
 
-        if self.config.full_day_trading:
-            from datetime import time as dt_time
-            self.monitor._window_end = dt_time(15, 55)
-            logger.info(f"  Window: 9:30 AM - 3:55 PM ET (full day)")
-        else:
-            logger.info(f"  Window: {self.config.trading_window_start}-{self.config.trading_window_end} ET (early)")
+        # Always trade full day — monitor exits up to 3:55 PM safety net
+        from datetime import time as dt_time
+        self.monitor._window_end = dt_time(15, 55)
+        logger.info(f"  Window: 6:00 AM - 3:55 PM ET (all day)")
         logger.info(f"  Max daily trades: {self.config.max_daily_trades}")
         logger.info(
             f"  Scanner: ${self.config.scanner_min_price}-${self.config.scanner_max_price}, "
