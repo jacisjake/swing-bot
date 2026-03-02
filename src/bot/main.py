@@ -231,13 +231,13 @@ class TradingBot:
         )
         logger.info(f"  Screener: TradingView")
 
-        # 0. Train regime detector (background-safe, non-blocking)
-        if self.config.enable_regime_gate:
-            self.regime_detector.refresh()
-            status = self.regime_detector.get_status()
-            logger.info(f"  Regime gate: {status['label']} ({status['category']}, {status['confidence']:.0%})")
+        # 0. Train regime detector (always, for dashboard display)
+        self.regime_detector.refresh()
+        status = self.regime_detector.get_status()
+        if status.get("trained"):
+            logger.info(f"  Regime: {status['label']} ({status['category']}, {status['confidence']:.0%})")
         else:
-            logger.info("  Regime gate: disabled")
+            logger.warning(f"  Regime: failed to train — {status.get('error', 'unknown')}")
 
         # 1. Initial sync with broker (REST, one-time)
         await self._sync_with_broker()
@@ -289,12 +289,13 @@ class TradingBot:
         # which would cancel ALL tasks in a gather. Independent tasks are isolated.
         data_task = asyncio.create_task(self._resilient_data_loop())
         trade_task = asyncio.create_task(self._resilient_trade_loop())
+        poll_task = asyncio.create_task(self._position_poll_loop())
 
         # Wait for shutdown signal (only thing in this coroutine)
         await self._shutdown_event.wait()
 
         # Clean shutdown: cancel the background tasks
-        for task in [data_task, trade_task]:
+        for task in [data_task, trade_task, poll_task]:
             task.cancel()
             try:
                 await task
@@ -335,6 +336,84 @@ class TradingBot:
                     f"restarting in 10s..."
                 )
                 await asyncio.sleep(10)
+
+    async def _position_poll_loop(self) -> None:
+        """
+        REST fallback for position monitoring.
+
+        DXLink may not send quotes for illiquid stocks. This polls
+        open positions every 30s via REST and runs exit checks,
+        ensuring stops/targets fire even without streaming data.
+        """
+        import time as _time
+
+        POLL_INTERVAL = 30  # seconds
+
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.sleep(POLL_INTERVAL)
+
+                positions = self.position_manager.get_open_positions()
+                if not positions:
+                    continue
+
+                for position in positions:
+                    symbol = position.symbol
+                    # Skip if we got a recent quote from DXLink (< 60s)
+                    quote = self.stream_handler._latest_quotes.get(symbol)
+                    if quote and quote.get("timestamp"):
+                        try:
+                            from datetime import datetime, timezone
+                            qt = datetime.fromisoformat(
+                                quote["timestamp"].replace("Z", "+00:00")
+                            )
+                            age = (datetime.now(timezone.utc) - qt).total_seconds()
+                            if age < 60:
+                                continue
+                        except (ValueError, TypeError):
+                            pass
+
+                    # No recent streaming quote — poll via REST
+                    try:
+                        price = self.client.get_latest_price(symbol)
+                    except Exception:
+                        price = None
+
+                    if price is None:
+                        continue
+
+                    position.update_price(price)
+                    logger.debug(
+                        f"[POLL] {symbol} REST price ${price:.2f} "
+                        f"(no stream data)"
+                    )
+
+                    # Run exit checks at this price
+                    exit_signal = await self.monitor.check_position_at_price(
+                        symbol, price
+                    )
+                    if exit_signal:
+                        logger.info(
+                            f"[POLL EXIT] {symbol}: {exit_signal.reason} "
+                            f"@ ${price:.2f}"
+                        )
+                        exec_result = await self.stream_handler.executor.execute_exit(
+                            symbol=symbol,
+                            reason=exit_signal.reason,
+                        )
+                        if exec_result.success:
+                            pnl = (
+                                exec_result.position.realized_pnl
+                                if exec_result.position
+                                else 0
+                            )
+                            logger.info(f"  Closed {symbol}: P&L ${pnl:.2f}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[POLL] Position poll error: {e}")
+                await asyncio.sleep(POLL_INTERVAL)
 
     async def stop(self) -> None:
         """Stop the trading bot gracefully."""
@@ -724,9 +803,8 @@ class TradingBot:
         # Reset portfolio limits daily counters
         self.portfolio_limits.reset_daily_limits()
 
-        # Refresh regime detector with latest daily bars
-        if self.config.enable_regime_gate:
-            self.regime_detector.refresh()
+        # Refresh regime detector with latest daily bars (always, for dashboard)
+        self.regime_detector.refresh()
 
         # Sync fresh state from broker
         await self._sync_with_broker()

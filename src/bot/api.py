@@ -205,6 +205,8 @@ async def get_positions() -> list[dict]:
                 "net_proceeds": net_proceeds,
                 "net_pnl": net_pnl,
                 "strategy": live_pos.strategy if live_pos and live_pos.strategy else "",
+                "entry_time": live_pos.entry_time.isoformat() if live_pos else None,
+                "stop_loss": live_pos.stop_loss if live_pos else None,
             })
         return results
     except Exception as e:
@@ -1050,8 +1052,7 @@ DASHBOARD_HTML = """
             min-height: 200px;
         }
         .scanner-section {
-            width: 360px;
-            flex-shrink: 0;
+            flex: 1;
             min-height: 200px;
         }
         @media (max-width: 900px) { .scanner-section { width: 100%; } }
@@ -1693,7 +1694,7 @@ DASHBOARD_HTML = """
                 infoBar.style.display = 'flex';
                 document.getElementById('chart-entry').textContent = formatCurrency(pos.entry_price);
                 document.getElementById('chart-strategy').textContent = pos.strategy || '--';
-                document.getElementById('chart-stop').textContent = '--';
+                document.getElementById('chart-stop').textContent = pos.stop_loss ? formatCurrency(pos.stop_loss) : '--';
             } else {
                 infoBar.style.display = 'none';
             }
@@ -1741,6 +1742,41 @@ DASHBOARD_HTML = """
                         axisLabelVisible: true,
                         title: `Entry $${pos.entry_price.toFixed(2)}`,
                     });
+
+                    // Entry marker on the candle
+                    if (pos.entry_time) {
+                        const entryTs = Math.floor(new Date(pos.entry_time).getTime() / 1000);
+                        // Find the candle closest to entry time
+                        let bestCandle = data.candles[0];
+                        let bestDiff = Infinity;
+                        for (const c of data.candles) {
+                            const diff = Math.abs(c.time - entryTs);
+                            if (diff < bestDiff) { bestDiff = diff; bestCandle = c; }
+                        }
+                        if (bestCandle) {
+                            const side = pos.side === 'long' ? 'belowBar' : 'aboveBar';
+                            const arrow = pos.side === 'long' ? 'arrowUp' : 'arrowDown';
+                            candleSeries.setMarkers([{
+                                time: bestCandle.time,
+                                position: side,
+                                color: '#3B82F6',
+                                shape: arrow,
+                                text: `${pos.side === 'long' ? 'BUY' : 'SHORT'} @ ${pos.entry_price.toFixed(2)}`,
+                            }]);
+                        }
+                    }
+
+                    // Stop loss line
+                    if (pos.stop_loss) {
+                        candleSeries.createPriceLine({
+                            price: pos.stop_loss,
+                            color: '#DC2626',
+                            lineWidth: 1,
+                            lineStyle: LightweightCharts.LineStyle.Dotted,
+                            axisLabelVisible: true,
+                            title: `Stop $${pos.stop_loss.toFixed(2)}`,
+                        });
+                    }
                 }
 
                 macdChart = LightweightCharts.createChart(document.getElementById('macd-container'), {
